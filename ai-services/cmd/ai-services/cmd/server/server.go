@@ -1,11 +1,12 @@
 package server
 
 import (
-	log "github.com/project-ai-services/ai-services/internal/pkg/logger"
-	"github.com/project-ai-services/ai-services/internal/pkg/podman"
-	"github.com/project-ai-services/ai-services/internal/pkg/server/router"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+
+	log "github.com/project-ai-services/ai-services/internal/pkg/logger"
+	"github.com/project-ai-services/ai-services/internal/pkg/runtime/podman"
+	"github.com/project-ai-services/ai-services/internal/pkg/server/router"
 )
 
 var (
