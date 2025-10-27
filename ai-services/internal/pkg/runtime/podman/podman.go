@@ -24,7 +24,18 @@ type PodmanClient struct {
 
 // NewPodmanClient creates and returns a new PodmanClient instance
 func NewPodmanClient() (*PodmanClient, error) {
-	ctx, err := bindings.NewConnectionWithIdentity(context.Background(), "ssh://root@127.0.0.1:51065/run/podman/podman.sock", "/Users/mayukac/.local/share/containers/podman/machine/machine", false)
+	// Default Podman socket URI is unix:///run/podman/podman.sock running on the local machine,
+	// but it can be overridden by the CONTAINER_HOST and CONTAINER_SSHKEY environment variable to support remote connections.
+	// Please use `podman system connection list` to see available connections.
+	// Reference:
+	// MacOS instructions runing in a remote VM:
+	// export CONTAINER_HOST=ssh://root@127.0.0.1:62904/run/podman/podman.sock
+	// export CONTAINER_SSHKEY=/Users/manjunath/.local/share/containers/podman/machine/machine
+	uri := "unix:///run/podman/podman.sock"
+	if v, found := os.LookupEnv("CONTAINER_HOST"); found {
+		uri = v
+	}
+	ctx, err := bindings.NewConnection(context.Background(), uri)
 	if err != nil {
 		return nil, err
 	}
