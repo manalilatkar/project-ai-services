@@ -122,7 +122,7 @@ spec:
         type: DirectoryOrCreate
     - name: minio-storage
       hostPath:
-        path: "/var/lib/ai-services/{{ .AppName }}/volumes/minio
+        path: "/var/lib/ai-services/{{ .AppName }}/volumes/minio"
         type: DirectoryOrCreate
     - name: milvus-data
       hostPath:
