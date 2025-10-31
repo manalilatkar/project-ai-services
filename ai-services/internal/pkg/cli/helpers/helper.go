@@ -129,10 +129,11 @@ func FetchContainerStartPeriod(runtime runtime.Runtime, containerNameOrId string
 
 type AppMetadata struct {
 	// TODO: Include other variables too
+	SMTLevel              *int       `yaml:"smtLevel,omitempty"`
 	PodTemplateExecutions [][]string `yaml:"podTemplateExecutions"`
 }
 
-func LoadMetdata(path string) (*AppMetadata, error) {
+func LoadMetadata(path string) (*AppMetadata, error) {
 	data, err := assets.ApplicationFS.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read metadata: %w", err)

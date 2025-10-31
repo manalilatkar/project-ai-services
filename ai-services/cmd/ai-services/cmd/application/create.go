@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -44,6 +46,12 @@ var createCmd = &cobra.Command{
 
 		cmd.Printf("Creating application '%s' using template '%s'\n", appName, templateName)
 
+		// set SMT level to 2, assuming it is running with root privileges (part of validation in bootstrap)
+		err := setSMTLevel()
+		if err != nil {
+			return fmt.Errorf("failed to set SMT level: %w", err)
+		}
+
 		// Fetch all the application Template names
 		appTemplateNames, err := helpers.FetchApplicationTemplatesNames()
 		if err != nil {
@@ -66,7 +74,7 @@ var createCmd = &cobra.Command{
 		metadataFilePath := applicationTemplatesPath + appTemplateName + "/metadata.yaml"
 
 		// load metadata.yml to fetch the dependencies list
-		appMetadata, err := helpers.LoadMetdata(metadataFilePath)
+		appMetadata, err := helpers.LoadMetadata(metadataFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to read app metadata: %w", err)
 		}
@@ -90,6 +98,114 @@ var createCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+func getSMTLevel(output string) (int, error) {
+	out := strings.TrimSpace(output)
+
+	if !strings.HasPrefix(out, "SMT=") {
+		return 0, fmt.Errorf("unexpected output: %s", out)
+	}
+
+	SMTLevelStr := strings.TrimPrefix(out, "SMT=")
+	SMTlevel, err := strconv.Atoi(SMTLevelStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse SMT level: %w", err)
+	}
+	return SMTlevel, nil
+}
+
+func setSMTLevel() error {
+
+	/*
+		1. Fetch current SMT level
+		2. Fetch the target SMT level
+		3. Check if SMT level is already set to target value
+		4. If not, set it to target value
+		5. Verify again
+	*/
+
+	// 1. Fetch Current SMT level
+	cmd := exec.Command("ppc64_cpu", "--smt")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to check current SMT level: %v, output: %s", err, string(out))
+	}
+
+	currentSMTlevel, err := getSMTLevel(string(out))
+	if err != nil {
+		return fmt.Errorf("failed to get current SMT level: %w", err)
+	}
+
+	// 2. Fetch the target SMT level
+	targetSMTLevel, err := getTargetSMTLevel()
+	if err != nil {
+		return fmt.Errorf("failed to get target SMT level: %w", err)
+	}
+
+	if targetSMTLevel == nil {
+		// No SMT level specified in metadata.yaml
+		fmt.Printf("No SMT level specified in metadata.yaml. Keeping it to current level: %d\n", currentSMTlevel)
+		return nil
+	}
+
+	// 3. Check if SMT level is already set to target value
+	if currentSMTlevel == *targetSMTLevel {
+		// already set
+		fmt.Printf("SMT level is already set to %d\n", targetSMTLevel)
+		return nil
+	}
+
+	// 4. Set SMT level to target value
+	arg := "--smt=" + strconv.Itoa(*targetSMTLevel)
+	cmd = exec.Command("ppc64_cpu", arg)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to set SMT level: %v, output: %s", err, string(out))
+	}
+
+	// 5. Verify again
+	cmd = exec.Command("ppc64_cpu", "--smt")
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to verify SMT level: %v, output: %s", err, string(out))
+	}
+
+	currentSMTlevel, err = getSMTLevel(string(out))
+	if err != nil {
+		return fmt.Errorf("failed to get SMT level after updating: %w", err)
+	}
+
+	if currentSMTlevel != *targetSMTLevel {
+		return fmt.Errorf("SMT level verification failed: expected %d, got %d", targetSMTLevel, currentSMTlevel)
+	}
+
+	fmt.Printf("SMT level set to %d successfully.\n", targetSMTLevel)
+
+	return nil
+}
+
+func getTargetSMTLevel() (*int, error) {
+	appTemplateNames, err := helpers.FetchApplicationTemplatesNames()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list templates: %w", err)
+	}
+
+	var appTemplateName string
+
+	if index := fetchAppTemplateIndex(appTemplateNames, templateName); index == -1 {
+		return nil, errors.New("provided template name is wrong. Please provide a valid template name")
+	} else {
+		appTemplateName = appTemplateNames[index]
+	}
+
+	metadataFilePath := applicationTemplatesPath + appTemplateName + "/metadata.yaml"
+
+	appMetadata, err := helpers.LoadMetadata(metadataFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read app metadata: %w", err)
+	}
+	return appMetadata.SMTLevel, nil
 }
 
 func init() {
