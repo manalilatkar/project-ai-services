@@ -1,10 +1,17 @@
 FROM registry.access.redhat.com/ubi9/ubi:9.6
 
 ARG SR_VERSION
+ARG DNF_FLAGS="--disablerepo=* --enablerepo=ubi-9-baseos-rpms --enablerepo=ubi-9-appstream-rpms"
 
 RUN curl -o ServiceReport-${SR_VERSION}.ppc64le.rpm https://public.dhe.ibm.com/software/server/POWER/Linux/yum/OSS/RHEL/9/ppc64le/ServiceReport-${SR_VERSION}.ppc64le.rpm \
-  && dnf update && dnf install -y \
-  sos kmod \
-  python3.12-pip python3.12 python3.12-devel sos python3-pexpect python3-ptyprocess python3-pyyaml python3-file-magic \
+  && dnf update ${DNF_FLAGS} -y \
+  && dnf install ${DNF_FLAGS} -y sos kmod \
+  python3.12-pip python3.12 python3.12-devel python3-pexpect python3-ptyprocess python3-pyyaml python3-file-magic \
   ServiceReport-${SR_VERSION}.ppc64le.rpm \
   && rm -f ServiceReport-${SR_VERSION}.ppc64le.rpm && rm -rf /var/cache/dnf && dnf clean all -y
+
+COPY requirements.txt requirements.txt
+ENV HF_XET_HIGH_PERFORMANCE 1
+RUN dnf install ${DNF_FLAGS} -y gcc \
+  && pip3.12 install -r requirements.txt \
+  && rm -rf /var/cache/dnf && dnf clean all -y
