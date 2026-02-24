@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import os
 import time
 import re
 from asyncio import BoundedSemaphore
+from contextlib import asynccontextmanager
 from typing import Optional
 import uvicorn
 import pypdfium2 as pdfium
@@ -42,8 +44,6 @@ def swagger_root():
         openapi_url="/openapi.json",
         title="AI-Services Summarization API - Swagger UI",
     )
-
-create_llm_session(pool_maxsize=settings.max_concurrent_requests)
 
 
 ALLOWED_FILE_EXTENSIONS = {".txt", ".pdf"}
@@ -152,8 +152,6 @@ def _build_messages(text, target_words, summary_length) -> list:
 
 
 async def _handle_summarize(
-    llm_model: str,
-    llm_endpoint: str,
     content_text: str,
     input_type: str,
     summary_length: Optional[int],
@@ -181,12 +179,12 @@ async def _handle_summarize(
     await concurrency_limiter.acquire()
     try:
         start = time.time()
-        logger.info(f"Received request with input size:{input_word_count} "
+        logger.info(f"Received {input_type} request with input size:{input_word_count} "
                     f"words{f', target summary length: {summary_length} words' if summary_length is not None else ''}")
-        result = query_vllm_summarize(
-            llm_endpoint=llm_endpoint,
+        result, in_tokens, out_tokens = query_vllm_summarize(
+            llm_endpoint=llm_model_dict['llm_model'],
             messages=messages,
-            model=llm_model,
+            model=llm_model_dict['llm_endpoint'],
             max_tokens=max_tokens,
             temperature=settings.summarization_temperature,
         )
@@ -202,17 +200,15 @@ async def _handle_summarize(
         )
 
     summary = _trim_to_last_sentence(result) if isinstance(result, str) else ""
-    input_tokens = int(input_word_count / settings.token_to_word_ratios.en)
-    output_tokens = int(_word_count(summary) / settings.token_to_word_ratios.en)
 
     return _build_success_response(
         summary=summary,
         original_length=input_word_count,
         input_type=input_type,
-        model=llm_model,
+        model=llm_model_dict['llm_model'],
         processing_time_ms=elapsed_ms,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
+        input_tokens=in_tokens,
+        output_tokens=out_tokens,
     )
 
 class SummaryData(BaseModel):
@@ -350,52 +346,52 @@ def _validate_summary_length(summary_length):
 
 
 @app.post("/v1/summarize",
-          response_model=SummarizeSuccessResponse,
-          responses=_error_responses,
-          summary="Summarize text or file",
-          description=(
-                  "Accepts **either** `application/json` or `multipart/form-data` based on "
-                  "the `Content-Type` header.\n\n"
-                  "---\n\n"
-                  "### Option 1: JSON body (`Content-Type: application/json`)\n\n"
-                  "| Field | Type | Required | Description |\n"
-                  "|-------|------|----------|-------------|\n"
-                  "| `text` | string | Yes | Plain text content to summarize |\n"
-                  "| `length` | integer | No | Desired summary length in words  |\n\n"
-                  "**Example:**\n"
-                  "```bash\n"
-                  'curl -X POST /v1/summarize -H "Content-Type: application/json" -d '
-                  '{\n'
-                  '  "text": "Artificial intelligence has made significant progress...",\n'
-                  '  "length": 25\n'
-                  '}\n'
-                  "```\n\n"
-                  "---\n\n"
-                  "### Option 2: Form data (`Content-Type: multipart/form-data`)\n\n"
-                  "| Field | Type | Required | Description |\n"
-                  "|-------|------|----------|-------------|\n"
-                  "| `file` | file | Conditional | `.txt` or `.pdf` file to summarize |\n"
-                  "| `length` | integer | No | Desired summary length in words |\n\n"
-                  "**Example (curl):**\n"
-                  "```bash\n"
-                  'curl -X POST /v1/summarize -F "file=@report.pdf" -F "length=100"\n'
-                  "```\n\n"
-                  "---\n\n"
-                  "**Note:** Swagger UI cannot render interactive input fields for this endpoint "
-                  "because it accepts two different content types. Use curl or Postman to test."
-          ),
-          response_description="Summarization result with metadata and token usage.",
-          tags=["Summarization"],
-          )
+response_model=SummarizeSuccessResponse,
+responses=_error_responses,
+summary="Summarize text or file",
+description=(
+      "Accepts **either** `application/json` or `multipart/form-data` based on "
+      "the `Content-Type` header.\n\n"
+      "---\n\n"
+      "### Option 1: JSON body (`Content-Type: application/json`)\n\n"
+      "| Field | Type | Required | Description |\n"
+      "|-------|------|----------|-------------|\n"
+      "| `text` | string | Yes | Plain text content to summarize |\n"
+      "| `length` | integer | No | Desired summary length in words  |\n\n"
+      "**Example:**\n"
+      "```bash\n"
+      'curl -X POST /v1/summarize -H "Content-Type: application/json" -d '
+      '{\n'
+      '  "text": "Artificial intelligence has made significant progress...",\n'
+      '  "length": 25\n'
+      '}\n'
+      "```\n\n"
+      "---\n\n"
+      "### Option 2: Form data (`Content-Type: multipart/form-data`)\n\n"
+      "| Field | Type | Required | Description |\n"
+      "|-------|------|----------|-------------|\n"
+      "| `file` | file | Conditional | `.txt` or `.pdf` file to summarize |\n"
+      "| `length` | integer | No | Desired summary length in words |\n\n"
+      "**Example (curl):**\n"
+      "```bash\n"
+      'curl -X POST /v1/summarize -F "file=@report.pdf" -F "length=100"\n'
+      "```\n\n"
+      "---\n\n"
+      "**Note:** Swagger UI cannot render interactive input fields for this endpoint "
+      "because it accepts two different content types. Use curl or Postman to test."
+),
+response_description="Summarization result with metadata and token usage.",
+tags=["Summarization"],
+)
 async def summarize(request: Request):
     """Accept plain text via JSON or text/file via multipart/form-data."""
-    if concurrency_limiter.locked():
-        return _build_error_response(
-            "SERVER_BUSY",
-            "Server is busy. Please try again later.",
-            429,
-        )
     try:
+        if concurrency_limiter.locked():
+            return _build_error_response(
+                "SERVER_BUSY",
+                "Server is busy. Please try again later.",
+                429,
+            )
         content_type = request.headers.get("content-type", "")
 
         # ----- JSON path -----
@@ -416,11 +412,9 @@ async def summarize(request: Request):
                     "Either 'text' or 'file' parameter is required",
                     400,
                 )
-            logger.info("Received text input")
             summary_length = _validate_summary_length(body.get("length"))
 
-            return await _handle_summarize(llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'], text,
-                                           "text", summary_length)
+            return await _handle_summarize(text,"text", summary_length)
 
         # ----- Multipart / form-data path -----
         elif "multipart/form-data" in content_type:
@@ -443,7 +437,7 @@ async def summarize(request: Request):
                 if ext == ".pdf":
                     try:
                         start = time.time()
-                        content_text = _extract_text_from_pdf(raw)
+                        content_text = await asyncio.to_thread(_extract_text_from_pdf, raw)
                         logger.debug(f"PDF extraction took {(time.time() - start) * 1000:.0f}ms")
                     except Exception as e:
                         logger.error(f"PDF extraction failed: {e}")
@@ -454,7 +448,6 @@ async def summarize(request: Request):
                         )
                 else:
                     content_text = raw.decode("utf-8", errors="replace")
-                input_type = "file"
             else:
                 return _build_error_response(
                     "MISSING_INPUT",
@@ -469,8 +462,7 @@ async def summarize(request: Request):
                     400,
                 )
 
-            return await _handle_summarize(llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'],
-                                           content_text.strip(), input_type, summary_length)
+            return await _handle_summarize(content_text.strip(), "file", summary_length)
 
         else:
             return _build_error_response(
@@ -491,8 +483,12 @@ async def summarize(request: Request):
 async def health():
     return {"status": "ok"}
 
+@asynccontextmanager
+async def lifespan():
+    initialize_models()
+    create_llm_session(pool_maxsize=settings.max_concurrent_requests)
+    yield
 
 if __name__ == "__main__":
-    initialize_models()
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)

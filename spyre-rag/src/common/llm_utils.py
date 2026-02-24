@@ -227,9 +227,13 @@ def query_vllm_summarize(
     result = response.json()
     logger.debug(f"vLLM response: {result}")
     content = ""
+    input_tokens = 0
+    output_tokens = 0
     if "choices" in result and len(result["choices"]) > 0:
         content = result["choices"][0].get("message", {}).get("content", "") or ""
-    return content.strip()
+        input_tokens = result.get("usage", {}).get("prompt_tokens", 0)
+        output_tokens = result.get("usage", {}).get("completion_tokens", 0)
+    return content.strip(), input_tokens, output_tokens
 
 def tokenize_with_llm(prompt, emb_endpoint):
     payload = {

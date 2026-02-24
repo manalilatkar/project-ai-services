@@ -107,7 +107,7 @@ class Settings:
         default_max_input_length = 6000
         default_prompt_template_token_count = 250
         default_summarization_coefficient = 0.2
-        default_summarization_prompt_token_count = 50
+        default_summarization_prompt_token_count = 100
         default_summarization_temperature = 0.2
         default_summarization_stop_words = "Keywords, Note, ***"
 
@@ -156,12 +156,12 @@ class Settings:
             logger.warning(f"Setting summarization_prompt_token_count to default '{default_summarization_prompt_token_count}' as it is missing in the settings")
 
         if not isinstance(self.summarization_temperature, float):
-                    object.__setattr__(self, "summarization_temperature", default_summarization_temperature)
-                    logger.warning(f"Setting summarization_temperature to default '{default_summarization_temperature}' as it is missing in the settings")
+            object.__setattr__(self, "summarization_temperature", default_summarization_temperature)
+            logger.warning(f"Setting summarization_temperature to default '{default_summarization_temperature}' as it is missing in the settings")
 
         if not isinstance(self.summarization_stop_words, str):
-                            object.__setattr__(self, "summarization_stop_words", default_summarization_stop_words)
-                            logger.warning(f"Setting summarization_stop_words to default '{default_summarization_stop_words}' as it is missing in the settings")
+            object.__setattr__(self, "summarization_stop_words", default_summarization_stop_words)
+            logger.warning(f"Setting summarization_stop_words to default '{default_summarization_stop_words}' as it is missing in the settings")
 
 
     @classmethod
