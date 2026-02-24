@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -22,15 +23,21 @@ import (
 
 // Variables for flags placeholder.
 var (
-	templateName          string
+	// common flags.
+	templateName string
+	rawArgParams []string
+	argParams    map[string]string
+
+	// podman flags.
 	skipModelDownload     bool
 	skipImageDownload     bool
 	skipChecks            []string
-	rawArgParams          []string
-	argParams             map[string]string
 	valuesFiles           []string
 	rawArgImagePullPolicy string
 	imagePullPolicy       image.ImagePullPolicy
+
+	// openshift flags.
+	timeout time.Duration
 )
 
 var createCmd = &cobra.Command{
@@ -91,9 +98,7 @@ var createCmd = &cobra.Command{
 
 		//nolint:godox
 		// TODO: Integrate Bootstrap validate for Openshift in create flow once ready. For now skipping it for Openshift runtime.
-		if vars.RuntimeFactory.GetRuntimeType() == types.RuntimeTypeOpenShift {
-			return nil
-		} else {
+		if vars.RuntimeFactory.GetRuntimeType() != types.RuntimeTypeOpenShift {
 			if err := doBootstrapValidate(); err != nil {
 				return err
 			}
@@ -114,6 +119,7 @@ var createCmd = &cobra.Command{
 			ArgParams:         argParams,
 			ValuesFiles:       valuesFiles,
 			ImagePullPolicy:   imagePullPolicy,
+			Timeout:           timeout,
 		}
 
 		return app.Create(ctx, opts)
@@ -141,47 +147,18 @@ func doBootstrapValidate() error {
 }
 
 func init() {
+	initCommonFlags()
+	initPodmanFlags()
+	initOpenShiftFlags()
+}
+
+func initCommonFlags() {
 	skipCheckDesc := appBootstrap.BuildSkipFlagDescription()
 	createCmd.Flags().StringSliceVar(&skipChecks, "skip-validation", []string{}, skipCheckDesc)
+
 	createCmd.Flags().StringVarP(&templateName, "template", "t", "", "Application template to use (required)")
 	_ = createCmd.MarkFlagRequired("template")
-	// Add a flag for skipping image download
-	createCmd.Flags().BoolVar(
-		&skipImageDownload,
-		"skip-image-download",
-		false,
-		"Skip container image pull/download during application creation\n\n"+
-			"Use this only if the required container images already exist locally\n"+
-			"Recommended for air-gapped or pre-provisioned environments\n\n"+
-			"Warning:\n"+
-			"- If set to true and images are missing → command will fail\n"+
-			"- If left false in air-gapped environments → pull/download attempt will fail\n",
-	)
-	createCmd.Flags().BoolVar(
-		&skipModelDownload,
-		"skip-model-download",
-		false,
-		"Skip model download during application creation\n\n"+
-			"Use this if local models already exist at /var/lib/ai-services/models/\n"+
-			"Recommended for air-gapped networks\n\n"+
-			"Warning:\n"+
-			"- If set to true and models are missing → command will fail\n"+
-			"- If left false in air-gapped environments → download attempt will fail\n",
-	)
-	createCmd.Flags().StringArrayVarP(
-		&valuesFiles,
-		"values",
-		"f",
-		[]string{},
-		"Specify values.yaml files to override default template values\n\n"+
-			"Usage:\n"+
-			"- Can be provided multiple times\n"+
-			"- Example: --values custom1.yaml --values custom2.yaml\n"+
-			"- Or shorthand: -f custom1.yaml -f custom2.yaml\n\n"+
-			"Notes:\n"+
-			"- Files are applied in the order provided\n"+
-			"- Later files override earlier ones\n",
-	)
+
 	createCmd.Flags().StringSliceVar(
 		&rawArgParams,
 		"params",
@@ -195,10 +172,57 @@ func init() {
 			"- When both --values and --params are provided, --params overrides --values\n",
 	)
 
+	createCmd.Flags().StringArrayVarP(
+		&valuesFiles,
+		"values",
+		"f",
+		[]string{},
+		"Specify values files to override default template values.\n\n"+
+			"Usage:\n"+
+			"- Can be provided multiple times; files are applied in order and later files override earlier ones\n",
+	)
+}
+
+func initPodmanFlags() {
+	createCmd.Flags().BoolVar(
+		&skipImageDownload,
+		"skip-image-download",
+		false,
+		"Skip container image pull/download during application creation\n\n"+
+			"Use this only if the required container images already exist locally\n"+
+			"Recommended for air-gapped or pre-provisioned environments\n\n"+
+			"Warning:\n"+
+			"- If set to true and images are missing → command will fail\n"+
+			"- If left false in air-gapped environments → pull/download attempt will fail\n"+
+			"Supported for podman runtime only.\n",
+	)
+	createCmd.Flags().BoolVar(
+		&skipModelDownload,
+		"skip-model-download",
+		false,
+		"Skip model download during application creation\n\n"+
+			"Use this if local models already exist at /var/lib/ai-services/models/\n"+
+			"Recommended for air-gapped networks\n\n"+
+			"Warning:\n"+
+			"- If set to true and models are missing → command will fail\n"+
+			"- If left false in air-gapped environments → download attempt will fail\n"+
+			"Supported for podman runtime only.\n",
+	)
+
 	initializeImagePullPolicyFlag()
 
 	// deprecated flags
-	deprecatedFlags()
+	deprecatedPodmanFlags()
+}
+
+func initOpenShiftFlags() {
+	createCmd.Flags().DurationVar(
+		&timeout,
+		"timeout",
+		0, // default
+		"Timeout for the operation (e.g. 10s, 2m, 1h).\n"+
+			"Supported for openshift runtime only.\n",
+	)
 }
 
 func initializeImagePullPolicyFlag() {
@@ -212,11 +236,12 @@ func initializeImagePullPolicyFlag() {
 			" - Never: never pull; use only local images\n"+
 			" - IfNotPresent: pull only if the image isn't already present locally \n\n"+
 			"Defaults to 'IfNotPresent' if not specified\n\n"+
-			"In air-gapped environments → specify 'Never'\n\n",
+			"In air-gapped environments → specify 'Never'\n\n"+
+			"Supported for podman runtime only.\n\n",
 	)
 }
 
-func deprecatedFlags() {
+func deprecatedPodmanFlags() {
 	if err := createCmd.Flags().MarkDeprecated("skip-image-download", "use --image-pull-policy instead"); err != nil {
 		panic(fmt.Sprintf("Failed to mark 'skip-image-download' flag deprecated. Err: %v", err))
 	}
