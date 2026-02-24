@@ -91,9 +91,8 @@ class Settings:
     temperature: float
     max_input_length: int
     prompt_template_token_count: int
-    vllm_pool_size: int
     summarization_coefficient: float
-    summarization_token_buffer: int
+    summarization_prompt_token_count: int
     summarization_temperature: float
     summarization_stop_words: str
 
@@ -107,9 +106,8 @@ class Settings:
         default_temperature = 0.0
         default_max_input_length = 6000
         default_prompt_template_token_count = 250
-        default_vllm_pool_size = 32
         default_summarization_coefficient = 0.2
-        default_summarization_token_buffer = 50
+        default_summarization_prompt_token_count = 50
         default_summarization_temperature = 0.2
         default_summarization_stop_words = "Keywords, Note, ***"
 
@@ -149,24 +147,20 @@ class Settings:
             object.__setattr__(self, "prompt_template_token_count", default_prompt_template_token_count)
             logger.warning(f"Setting prompt_template_token_count to default '{default_prompt_template_token_count}' as it is missing in the settings")
 
-        if not isinstance(self.vllm_pool_size, int):
-            object.__setattr__(self, "prompt_template_token_count", default_vllm_pool_size)
-            logger.warning(f"Setting prompt_template_token_count to default '{default_vllm_pool_size}' as it is missing in the settings")
-
         if not isinstance(self.summarization_coefficient, float):
-            object.__setattr__(self, "prompt_template_token_count", default_summarization_coefficient)
-            logger.warning(f"Setting prompt_template_token_count to default '{default_summarization_coefficient}' as it is missing in the settings")
+            object.__setattr__(self, "summarization_coefficient", default_summarization_coefficient)
+            logger.warning(f"Setting summarization_coefficient to default '{default_summarization_coefficient}' as it is missing in the settings")
 
-        if not isinstance(self.summarization_token_buffer, int):
-            object.__setattr__(self, "prompt_template_token_count", default_summarization_token_buffer)
-            logger.warning(f"Setting prompt_template_token_count to default '{default_summarization_token_buffer}' as it is missing in the settings")
+        if not isinstance(self.summarization_prompt_token_count, int):
+            object.__setattr__(self, "summarization_prompt_token_count", default_summarization_prompt_token_count)
+            logger.warning(f"Setting summarization_prompt_token_count to default '{default_summarization_prompt_token_count}' as it is missing in the settings")
 
         if not isinstance(self.summarization_temperature, float):
-                    object.__setattr__(self, "prompt_template_token_count", default_summarization_temperature)
+                    object.__setattr__(self, "summarization_temperature", default_summarization_temperature)
                     logger.warning(f"Setting summarization_temperature to default '{default_summarization_temperature}' as it is missing in the settings")
 
         if not isinstance(self.summarization_stop_words, str):
-                            object.__setattr__(self, "prompt_template_token_count", default_summarization_stop_words)
+                            object.__setattr__(self, "summarization_stop_words", default_summarization_stop_words)
                             logger.warning(f"Setting summarization_stop_words to default '{default_summarization_stop_words}' as it is missing in the settings")
 
 
@@ -184,9 +178,8 @@ class Settings:
             temperature = data.get("temperature"),
             max_input_length = data.get ("max_input_length"),
             prompt_template_token_count = data.get("prompt_template_token_count"),
-            vllm_pool_size = data.get("vllm_pool_size"),
             summarization_coefficient = data.get("summarization_coefficient"),
-            summarization_token_buffer = data.get("summarization_token_buffer"),
+            summarization_prompt_token_count = data.get("summarization_prompt_token_count"),
             summarization_temperature = data.get("summarization_temperature"),
             summarization_stop_words = data.get("summarization_stop_words")
         )

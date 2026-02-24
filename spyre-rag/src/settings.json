@@ -20,9 +20,8 @@
   "temperature": 0.0,
   "max_input_length": 6000,
   "prompt_template_token_count": 250,
-  "vllm_pool_size": 32,
   "summarization_coefficient": 0.2,
-  "summarization_token_buffer": 100,
+  "summarization_prompt_token_count": 100,
   "summarization_temperature": 0.2,
   "summarization_stop_words": "Keywords, Note, ***"
 }

@@ -43,7 +43,7 @@ def swagger_root():
         title="AI-Services Summarization API - Swagger UI",
     )
 
-create_llm_session(pool_maxsize=settings.vllm_pool_size)
+create_llm_session(pool_maxsize=settings.max_concurrent_requests)
 
 
 ALLOWED_FILE_EXTENSIONS = {".txt", ".pdf"}
@@ -52,7 +52,7 @@ ALLOWED_FILE_EXTENSIONS = {".txt", ".pdf"}
 # input_words/ratio + buf + (input_words/ratio)*coeff < max_model_len
 # => input_words * (1 + coeff) / ratio < max_model_len - buf
 MAX_INPUT_WORDS = int(
-    (settings.context_lengths.granite_3_3_8b_instruct - settings.summarization_token_buffer)
+    (settings.context_lengths.granite_3_3_8b_instruct - settings.summarization_prompt_token_count)
     * settings.token_to_word_ratios.en
     / (1 + settings.summarization_coefficient)
 )
@@ -73,7 +73,7 @@ def _compute_target_and_max_tokens(input_word_count: int, summary_length: Option
         target_words = max(1, int(input_word_count * settings.summarization_coefficient))
 
     est_output_tokens = int(target_words / settings.token_to_word_ratios.en)
-    max_tokens = est_output_tokens + settings.summarization_token_buffer
+    max_tokens = est_output_tokens + settings.summarization_prompt_token_count
     logger.debug(f"max tokens: {max_tokens}, estimated output tokens: {est_output_tokens}")
     return target_words, max_tokens
 
@@ -134,13 +134,6 @@ def _build_error_response(code: str, message: str, status: int):
         },
     )
 
-
-def _build_prompt(content_text, target_words, summary_length):
-    if summary_length:
-        return settings.prompts.summarize_with_length.format(target_words=target_words, text=content_text)
-    else:
-        return settings.prompts.summarize_without_length.format(text=content_text)
-
 def _build_messages(text, target_words, summary_length) -> list:
     if summary_length:
         user_prompt = settings.prompts.summarize_user_prompt_with_length.format(target_words=target_words, text=text)
@@ -177,7 +170,7 @@ async def _handle_summarize(
     if input_word_count > MAX_INPUT_WORDS:
         return _build_error_response(
             "CONTEXT_LIMIT_EXCEEDED",
-            "File size exceeds maximum token limit",
+            "Input size exceeds maximum token limit",
             413,
         )
 
@@ -188,6 +181,8 @@ async def _handle_summarize(
     await concurrency_limiter.acquire()
     try:
         start = time.time()
+        logger.info(f"Received request with input size:{input_word_count} "
+                    f"words{f', target summary length: {summary_length} words' if summary_length is not None else ''}")
         result = query_vllm_summarize(
             llm_endpoint=llm_endpoint,
             messages=messages,
@@ -341,6 +336,19 @@ _error_responses = {
 }
 
 
+def _validate_summary_length(summary_length):
+    if summary_length:
+        try:
+            summary_length = int(summary_length)
+        except (TypeError, ValueError):
+            return _build_error_response(
+                "INVALID_PARAMETER",
+                "length must be an integer",
+                400,
+            )
+    return summary_length
+
+
 @app.post("/v1/summarize",
           response_model=SummarizeSuccessResponse,
           responses=_error_responses,
@@ -381,107 +389,103 @@ _error_responses = {
           )
 async def summarize(request: Request):
     """Accept plain text via JSON or text/file via multipart/form-data."""
-    llm_model = llm_model_dict['llm_model']
-    llm_endpoint = llm_model_dict['llm_endpoint']
-    content_type = request.headers.get("content-type", "")
+    if concurrency_limiter.locked():
+        return _build_error_response(
+            "SERVER_BUSY",
+            "Server is busy. Please try again later.",
+            429,
+        )
+    try:
+        content_type = request.headers.get("content-type", "")
 
-    # ----- JSON path -----
-    if "application/json" in content_type:
-        try:
-            body = await request.json()
-        except Exception:
-            return _build_error_response(
-                "INVALID_JSON",
-                "Request body is not valid JSON",
-                400,
-            )
-
-        text = body.get("text").strip()
-        if not text:
-            return _build_error_response(
-                "MISSING_INPUT",
-                "Either 'text' or 'file' parameter is required",
-                400,
-            )
-
-        summary_length = body.get("length")
-        if summary_length is not None:
+        # ----- JSON path -----
+        if "application/json" in content_type:
             try:
-                summary_length = int(summary_length)
-            except (TypeError, ValueError):
+                body = await request.json()
+            except Exception:
                 return _build_error_response(
-                    "INVALID_PARAMETER",
-                    "length must be an integer",
+                    "INVALID_JSON",
+                    "Request body is not valid JSON",
                     400,
                 )
 
-        return await _handle_summarize(llm_model, llm_endpoint, text, "text", summary_length)
-
-    # ----- Multipart / form-data path -----
-    elif "multipart/form-data" in content_type:
-        form = await request.form()
-        file: Optional[UploadFile] = form.get("file")
-        length_raw = form.get("length")
-
-        summary_length: Optional[int] = None
-        if length_raw is not None:
-            try:
-                summary_length = int(length_raw)
-            except (TypeError, ValueError):
+            text = body.get("text").strip()
+            if not text:
                 return _build_error_response(
-                    "INVALID_PARAMETER",
-                    "length must be an integer",
+                    "MISSING_INPUT",
+                    "Either 'text' or 'file' parameter is required",
                     400,
                 )
+            logger.info("Received text input")
+            summary_length = _validate_summary_length(body.get("length"))
 
-        if file and hasattr(file, "filename"):
-            filename = file.filename or ""
-            ext = os.path.splitext(filename)[1].lower()
-            if ext not in ALLOWED_FILE_EXTENSIONS:
-                return _build_error_response(
-                    "UNSUPPORTED_FILE_TYPE",
-                    "Only .txt and .pdf files are allowed.",
-                    400,
-                )
-            raw = await file.read()
-            if ext == ".pdf":
-                try:
-                    start = time.time()
-                    content_text = _extract_text_from_pdf(raw)
-                    logger.info(f"PDF extraction took {(time.time() - start) * 1000:.0f}ms")
-                except Exception as e:
-                    logger.error(f"PDF extraction failed: {e}")
+            return await _handle_summarize(llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'], text,
+                                           "text", summary_length)
+
+        # ----- Multipart / form-data path -----
+        elif "multipart/form-data" in content_type:
+            form = await request.form()
+            file: Optional[UploadFile] = form.get("file")
+            logger.info("Received file input")
+
+            summary_length = _validate_summary_length(form.get("length"))
+
+            if file and hasattr(file, "filename"):
+                filename = file.filename or ""
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in ALLOWED_FILE_EXTENSIONS:
                     return _build_error_response(
-                        "PDF_EXTRACTION_ERROR",
-                        "Failed to extract text from PDF file.",
+                        "UNSUPPORTED_FILE_TYPE",
+                        "Only .txt and .pdf files are allowed.",
                         400,
                     )
+                raw = await file.read()
+                if ext == ".pdf":
+                    try:
+                        start = time.time()
+                        content_text = _extract_text_from_pdf(raw)
+                        logger.debug(f"PDF extraction took {(time.time() - start) * 1000:.0f}ms")
+                    except Exception as e:
+                        logger.error(f"PDF extraction failed: {e}")
+                        return _build_error_response(
+                            "PDF_EXTRACTION_ERROR",
+                            "Failed to extract text from PDF file.",
+                            400,
+                        )
+                else:
+                    content_text = raw.decode("utf-8", errors="replace")
+                input_type = "file"
             else:
-                content_text = raw.decode("utf-8", errors="replace")
-            input_type = "file"
+                return _build_error_response(
+                    "MISSING_INPUT",
+                    "Either 'text' or 'file' parameter is required",
+                    400,
+                )
+
+            if not content_text or not content_text.strip():
+                return _build_error_response(
+                    "EMPTY_INPUT",
+                    "The provided input contains no extractable text.",
+                    400,
+                )
+
+            return await _handle_summarize(llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'],
+                                           content_text.strip(), input_type, summary_length)
+
         else:
             return _build_error_response(
-                "MISSING_INPUT",
-                "Either 'text' or 'file' parameter is required",
-                400,
+                "UNSUPPORTED_CONTENT_TYPE",
+                "Content-Type must be application/json or multipart/form-data",
+                415,
             )
 
-        if not content_text or not content_text.strip():
-            return _build_error_response(
-                "EMPTY_INPUT",
-                "The provided input contains no extractable text.",
-                400,
-            )
-
-        return await _handle_summarize(llm_model, llm_endpoint, content_text.strip(), input_type, summary_length)
-
-    else:
+    except Exception as e:
+        logger.error(f"Got exception while generating summary: {e}")
         return _build_error_response(
-            "UNSUPPORTED_CONTENT_TYPE",
-            "Content-Type must be application/json or multipart/form-data",
-            415,
+            "INTERNAL_SERVER_ERROR",
+            "Failed to generate summary. Please try again later",
+            500,
         )
-
 
 @app.get("/health")
 async def health():

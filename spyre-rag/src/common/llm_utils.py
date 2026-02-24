@@ -196,7 +196,6 @@ def query_vllm_summarize(
         "accept": "application/json",
         "Content-type": "application/json",
     }
-    logger.info(f"Calling vLLM with prompt: {messages}")
     stop_words = [w for w in settings.summarization_stop_words.split(",") if w]
     payload = {
         "messages": messages,
@@ -226,7 +225,7 @@ def query_vllm_summarize(
         return {"error": str(e)}
 
     result = response.json()
-    logger.info(f"vLLM response: {result}")
+    logger.debug(f"vLLM response: {result}")
     content = ""
     if "choices" in result and len(result["choices"]) > 0:
         content = result["choices"][0].get("message", {}).get("content", "") or ""
