@@ -68,14 +68,14 @@ def _word_count(text: str) -> int:
 
 def _compute_target_and_max_tokens(input_word_count: int, summary_length: Optional[int]):
     if summary_length is not None:
-        target_words = summary_length
+        target_word_count = summary_length
     else:
-        target_words = max(1, int(input_word_count * settings.summarization_coefficient))
+        target_word_count = max(1, int(input_word_count * settings.summarization_coefficient))
 
-    est_output_tokens = int(target_words / settings.token_to_word_ratios.en)
+    est_output_tokens = int(target_word_count / settings.token_to_word_ratios.en)
     max_tokens = est_output_tokens + settings.summarization_prompt_token_count
     logger.debug(f"max tokens: {max_tokens}, estimated output tokens: {est_output_tokens}")
-    return target_words, max_tokens
+    return target_word_count, max_tokens
 
 def _extract_text_from_pdf(content: bytes) -> str:
     pdf = pdfium.PdfDocument(content)
@@ -158,7 +158,7 @@ async def _handle_summarize(
 ):
     """Core summarization logic shared by both JSON and form-data paths."""
     input_word_count = _word_count(content_text)
-    if summary_length and summary_length > input_word_count:
+    if summary_length > input_word_count:
         return _build_error_response(
             "INPUT_TEXT_SMALLER_THAN_SUMMARY_LENGTH",
             "Input text is smaller than summary length",
