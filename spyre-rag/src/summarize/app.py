@@ -44,7 +44,6 @@ def swagger_root():
         title="AI-Services Summarization API - Swagger UI",
     )
 
-
 ALLOWED_FILE_EXTENSIONS = {".txt", ".pdf"}
 
 # Pre-compute max input word count from context length at startup
@@ -59,8 +58,6 @@ MAX_INPUT_WORDS = int(
 def initialize_models():
     global llm_model_dict
     _, llm_model_dict,_  = get_model_endpoints()
-
-
 
 async def handle_summarize(
     content_text: str,
@@ -122,10 +119,6 @@ async def handle_summarize(
         input_tokens=in_tokens,
         output_tokens=out_tokens,
     )
-
-
-
-
 
 @app.post("/v1/summarize",
 response_model=SummarizeSuccessResponse,
@@ -263,7 +256,6 @@ async def summarize(request: Request):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
 
 
 if __name__ == "__main__":

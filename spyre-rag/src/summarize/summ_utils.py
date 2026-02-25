@@ -80,7 +80,6 @@ def build_success_response(
         },
     }
 
-
 def build_error_response(code: str, message: str, status: int):
     return JSONResponse(
         status_code=status,
@@ -156,7 +155,6 @@ class SummarizeSuccessResponse(BaseModel):
     }
 
 
-
 class ErrorDetail(BaseModel):
     code: str = Field(..., description="Machine-readable error code.")
     message: str = Field(..., description="Human-readable error message.")
@@ -178,6 +176,7 @@ class SummarizeErrorResponseBadRequest(BaseModel):
         }
     }
 
+
 class SummarizeErrorResponseContextLimitExceeded(BaseModel):
     error: ErrorDetail
 
@@ -193,6 +192,7 @@ class SummarizeErrorResponseContextLimitExceeded(BaseModel):
         }
     }
 
+
 class SummarizeErrorResponseUnsupportedContentType(BaseModel):
     error: ErrorDetail
 
@@ -207,6 +207,7 @@ class SummarizeErrorResponseUnsupportedContentType(BaseModel):
             }
         }
     }
+
 
 class SummarizeErrorResponseInternalServiceError(BaseModel):
     error: ErrorDetail
