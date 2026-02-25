@@ -1,22 +1,14 @@
 import asyncio
-import logging
-import os
 import time
-import re
 from asyncio import BoundedSemaphore
 from contextlib import asynccontextmanager
-from typing import Optional
 import uvicorn
-import pypdfium2 as pdfium
 from fastapi import FastAPI, Request, UploadFile
-from pydantic import BaseModel, Field
-from fastapi.responses import JSONResponse
 from fastapi.openapi.docs import get_swagger_ui_html
 
 from common.llm_utils import create_llm_session, query_vllm_summarize
-from common.settings import get_settings
 from common.misc_utils import get_model_endpoints, set_log_level, get_logger
-
+from summ_utils import *
 
 log_level = logging.INFO
 level = os.getenv("LOG_LEVEL", "").removeprefix("--").lower()
@@ -24,9 +16,9 @@ if level != "":
     if "debug" in level:
         log_level = logging.DEBUG
     elif not "info" in level:
-        raise Exception(f"Unknown LOG_LEVEL passed: '{level}'")
+        print(f"Unknown LOG_LEVEL passed: '{level}'")
 set_log_level(log_level)
-logger = get_logger("Summarize")
+logger = get_logger("app")
 
 settings = get_settings()
 concurrency_limiter = BoundedSemaphore(settings.max_concurrent_requests)
@@ -66,122 +58,34 @@ MAX_INPUT_WORDS = int(
 
 def initialize_models():
     global llm_model_dict
-    _, llm_model_dict, _ = get_model_endpoints()
-
-def _word_count(text: str) -> int:
-    return len(text.split())
+    _, llm_model_dict,  = get_model_endpoints()
 
 
 
-def _compute_target_and_max_tokens(input_word_count: int, summary_length: Optional[int]):
-    if summary_length is not None:
-        target_word_count = summary_length
-    else:
-        target_word_count = max(1, int(input_word_count * settings.summarization_coefficient))
-
-    est_output_tokens = int(target_word_count / settings.token_to_word_ratios.en)
-    max_tokens = est_output_tokens + settings.summarization_prompt_token_count
-    logger.debug(f"max tokens: {max_tokens}, estimated output tokens: {est_output_tokens}")
-    return target_word_count, max_tokens
-
-def _extract_text_from_pdf(content: bytes) -> str:
-    pdf = pdfium.PdfDocument(content)
-    text_parts = []
-    for page_index in range(len(pdf)):
-        page = pdf[page_index]
-        textpage = page.get_textpage()
-        text_parts.append(textpage.get_text_range())
-        textpage.close()
-        page.close()
-    pdf.close()
-    return "\n".join(text_parts)
-
-def _trim_to_last_sentence(text: str) -> str:
-    """Remove any trailing incomplete sentence."""
-    match = re.match(r"(.*[.!?])", text, re.DOTALL)
-    return match.group(1).strip() if match else text.strip()
-
-def _build_success_response(
-    summary: str,
-    original_length: int,
-    input_type: str,
-    model: str,
-    processing_time_ms: int,
-    input_tokens: int,
-    output_tokens: int,
-):
-    return {
-        "data": {
-            "summary": summary,
-            "original_length": original_length,
-            "summary_length": _word_count(summary),
-        },
-        "meta": {
-            "model": model,
-            "processing_time_ms": processing_time_ms,
-            "input_type": input_type,
-        },
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        },
-    }
-
-
-def _build_error_response(code: str, message: str, status: int):
-    return JSONResponse(
-        status_code=status,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "status": status,
-            }
-        },
-    )
-
-def _build_messages(text, target_words, summary_length) -> list:
-    if summary_length:
-        user_prompt = settings.prompts.summarize_user_prompt_with_length.format(target_words=target_words, text=text)
-    else:
-        user_prompt = settings.prompts.summarize_user_prompt_without_length.format(text=text)
-    return [
-        {
-            "role": "system",
-            "content": settings.prompts.summarize_system_prompt,
-        },
-        {
-            "role": "user",
-            "content": user_prompt,
-        },
-    ]
-
-
-async def _handle_summarize(
+async def handle_summarize(
     content_text: str,
     input_type: str,
     summary_length: Optional[int],
 ):
     """Core summarization logic shared by both JSON and form-data paths."""
-    input_word_count = _word_count(content_text)
+    input_word_count = word_count(content_text)
     if summary_length and summary_length > input_word_count:
-        return _build_error_response(
+        return build_error_response(
             "INPUT_TEXT_SMALLER_THAN_SUMMARY_LENGTH",
             "Input text is smaller than summary length",
             400,
         )
 
     if input_word_count > MAX_INPUT_WORDS:
-        return _build_error_response(
+        return build_error_response(
             "CONTEXT_LIMIT_EXCEEDED",
             "Input size exceeds maximum token limit",
             413,
         )
 
-    target_words, max_tokens = _compute_target_and_max_tokens(input_word_count, summary_length)
+    target_words, max_tokens = compute_target_and_max_tokens(input_word_count, summary_length)
 
-    messages = _build_messages(content_text, target_words, summary_length)
+    messages = build_messages(content_text, target_words, summary_length)
 
     await concurrency_limiter.acquire()
     try:
@@ -195,20 +99,21 @@ async def _handle_summarize(
             max_tokens=max_tokens,
             temperature=settings.summarization_temperature,
         )
+        logger.info(f"Input tokens: {in_tokens}, output tokens: {out_tokens}")
         elapsed_ms = int((time.time() - start) * 1000)
     finally:
         concurrency_limiter.release()
 
     if isinstance(result, dict) and "error" in result:
-        return _build_error_response(
+        return build_error_response(
             "LLM_ERROR",
             "Failed to generate summary. Please try again later",
             500,
         )
 
-    summary = _trim_to_last_sentence(result) if isinstance(result, str) else ""
+    summary = trim_to_last_sentence(result) if isinstance(result, str) else ""
 
-    return _build_success_response(
+    return build_success_response(
         summary=summary,
         original_length=input_word_count,
         input_type=input_type,
@@ -339,12 +244,12 @@ _error_responses = {
 }
 
 
-def _validate_summary_length(summary_length):
+def validate_summary_length(summary_length):
     if summary_length:
         try:
             summary_length = int(summary_length)
         except (TypeError, ValueError):
-            return _build_error_response(
+            return build_error_response(
                 "INVALID_PARAMETER",
                 "length must be an integer",
                 400,
@@ -394,7 +299,7 @@ async def summarize(request: Request):
     """Accept plain text via JSON or text/file via multipart/form-data."""
     try:
         if concurrency_limiter.locked():
-            return _build_error_response(
+            return build_error_response(
                 "SERVER_BUSY",
                 "Server is busy. Please try again later.",
                 429,
@@ -406,7 +311,7 @@ async def summarize(request: Request):
             try:
                 body = await request.json()
             except Exception:
-                return _build_error_response(
+                return build_error_response(
                     "INVALID_JSON",
                     "Request body is not valid JSON",
                     400,
@@ -414,14 +319,14 @@ async def summarize(request: Request):
 
             text = body.get("text").strip()
             if not text:
-                return _build_error_response(
+                return build_error_response(
                     "MISSING_INPUT",
                     "Either 'text' or 'file' parameter is required",
                     400,
                 )
-            summary_length = _validate_summary_length(body.get("length"))
+            summary_length = validate_summary_length(body.get("length"))
 
-            return await _handle_summarize(text,"text", summary_length)
+            return await handle_summarize(text,"text", summary_length)
 
         # ----- Multipart / form-data path -----
         elif "multipart/form-data" in content_type:
@@ -429,13 +334,13 @@ async def summarize(request: Request):
             file: Optional[UploadFile] = form.get("file")
             logger.info("Received file input")
 
-            summary_length = _validate_summary_length(form.get("length"))
+            summary_length = validate_summary_length(form.get("length"))
 
             if file and hasattr(file, "filename"):
                 filename = file.filename or ""
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in ALLOWED_FILE_EXTENSIONS:
-                    return _build_error_response(
+                    return build_error_response(
                         "UNSUPPORTED_FILE_TYPE",
                         "Only .txt and .pdf files are allowed.",
                         400,
@@ -444,11 +349,11 @@ async def summarize(request: Request):
                 if ext == ".pdf":
                     try:
                         start = time.time()
-                        content_text = await asyncio.to_thread(_extract_text_from_pdf, raw)
+                        content_text = await asyncio.to_thread(extract_text_from_pdf, raw)
                         logger.debug(f"PDF extraction took {(time.time() - start) * 1000:.0f}ms")
                     except Exception as e:
                         logger.error(f"PDF extraction failed: {e}")
-                        return _build_error_response(
+                        return build_error_response(
                             "PDF_EXTRACTION_ERROR",
                             "Failed to extract text from PDF file.",
                             400,
@@ -456,23 +361,23 @@ async def summarize(request: Request):
                 else:
                     content_text = raw.decode("utf-8", errors="replace")
             else:
-                return _build_error_response(
+                return build_error_response(
                     "MISSING_INPUT",
                     "Either 'text' or 'file' parameter is required",
                     400,
                 )
 
             if not content_text or not content_text.strip():
-                return _build_error_response(
+                return build_error_response(
                     "EMPTY_INPUT",
                     "The provided input contains no extractable text.",
                     400,
                 )
 
-            return await _handle_summarize(content_text.strip(), "file", summary_length)
+            return await handle_summarize(content_text.strip(), "file", summary_length)
 
         else:
-            return _build_error_response(
+            return build_error_response(
                 "UNSUPPORTED_CONTENT_TYPE",
                 "Content-Type must be application/json or multipart/form-data",
                 415,
@@ -480,7 +385,7 @@ async def summarize(request: Request):
 
     except Exception as e:
         logger.error(f"Got exception while generating summary: {e}")
-        return _build_error_response(
+        return build_error_response(
             "INTERNAL_SERVER_ERROR",
             "Failed to generate summary. Please try again later",
             500,
