@@ -49,7 +49,7 @@ ALLOWED_FILE_EXTENSIONS = {".txt", ".pdf"}
 @app.exception_handler(SummarizeException)
 async def summarize_exception_handler(request: Request, exc: SummarizeException):
     return JSONResponse(
-        status_code=exc.status,
+        status_code=exc.code,
         content={
             "error": {
                 "code": exc.code,
@@ -215,6 +215,8 @@ async def summarize(request: Request):
             raise SummarizeException(415, "UNSUPPORTED_CONTENT_TYPE",
                                      "Content-Type must be application/json or multipart/form-data")
 
+    except SummarizeException as se:
+        raise se
     except Exception as e:
         logger.error(f"Got exception while generating summary: {e}")
         raise SummarizeException(500, "INTERNAL_SERVER_ERROR",
