@@ -75,7 +75,7 @@ async def handle_summarize(
             "Input text is smaller than summary length")
 
     if input_word_count > MAX_INPUT_WORDS:
-        raise SummarizeException(4013, "CONTEXT_LIMIT_EXCEEDED",
+        raise SummarizeException(413, "CONTEXT_LIMIT_EXCEEDED",
                                  "Input size exceeds maximum token limit")
 
     target_words, max_tokens = compute_target_and_max_tokens(input_word_count, summary_length)
