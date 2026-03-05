@@ -11,8 +11,9 @@ from contextlib import asynccontextmanager
 from asyncio import BoundedSemaphore
 from functools import wraps
 import common.db_utils as db
-from common.llm_utils import create_llm_session, query_vllm_stream, query_vllm_non_stream, query_vllm_models
 from common.misc_utils import get_model_endpoints, set_log_level, set_request_id
+from common.llm_utils import create_llm_session, query_vllm_stream, query_vllm_non_stream, query_vllm_models, lang_en, \
+    lang_de
 from common.settings import get_settings
 from common.perf_utils import perf_registry
 from retrieve.backend_utils import search_only, validate_query_length
@@ -30,7 +31,7 @@ from retrieve.response_utils import (
 )
 import uvicorn
 from starlette.concurrency import iterate_in_threadpool
-
+from lingua import Language, LanguageDetectorBuilder
 
 log_level = logging.INFO
 level = os.getenv("LOG_LEVEL", "").removeprefix("--").lower()
@@ -42,7 +43,7 @@ if level != "":
 set_log_level(log_level)
 
 vectorstore = None
-
+_language_detector = None
 # Globals to be set dynamically
 emb_model_dict = {}
 llm_model_dict = {}
@@ -62,10 +63,24 @@ def initialize_vectorstore():
     global vectorstore
     vectorstore = db.get_vector_store()
 
+
+def setup_language_detector(languages: list[Language]):
+    """Call once at app startup, before serving requests."""
+    global _language_detector
+    if _language_detector is not None:
+        return
+    _language_detector = (
+        LanguageDetectorBuilder
+        .from_languages(*languages)
+        .with_preloaded_language_models()
+        .build()
+    )
+
 @asynccontextmanager
 async def lifespan(app):
     initialize_models()
     initialize_vectorstore()
+    setup_language_detector([Language.ENGLISH, Language.GERMAN])
     create_llm_session(pool_maxsize=POOL_SIZE)
     yield
 
@@ -104,6 +119,22 @@ def limit_concurrency(f):
             concurrency_limiter.release()
     return wrapper
 
+def detect_language(text: str, min_confidence: float = settings.language_detection_min_confidence) -> str:
+    """
+    Detect the language of a text string.
+
+    Returns a language code (EN, DE) if confidence >= min_confidence, else EN by default.
+    Thread-safe — can be called from any endpoint or background task.
+    """
+    if not _language_detector:
+        raise RuntimeError("Lingua detector not initialized. Call setup_language_detector() at startup.")
+
+    confidences = _language_detector.compute_language_confidence_values(text)
+    if confidences and confidences[0].value >= min_confidence:
+        top = confidences[0]
+        return top.language.iso_code_639_1.name
+    return lang_en
+
 @app.post(
     "/reference",
     response_model=ReferenceResponse,
@@ -114,14 +145,14 @@ async def get_reference_docs(req: ReferenceRequest) -> ReferenceResponse:
     # Validate query is not empty
     if not req.prompt or not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
-    
+
     try:
         emb_model = emb_model_dict['emb_model']
         emb_endpoint = emb_model_dict['emb_endpoint']
         emb_max_tokens = emb_model_dict['max_tokens']
         reranker_model = reranker_model_dict['reranker_model']
         reranker_endpoint = reranker_model_dict['reranker_endpoint']
-        
+
         # Validate query length
         is_valid, error_msg = await asyncio.to_thread(
             validate_query_length, req.prompt, emb_endpoint
@@ -217,7 +248,7 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
         raise HTTPException(status_code=400, detail="messages can't be empty")
 
     query = req.messages[0].content
-    
+
     # Validate query is not empty
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
@@ -230,7 +261,7 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
         llm_endpoint = llm_model_dict['llm_endpoint']
         reranker_model = reranker_model_dict['reranker_model']
         reranker_endpoint = reranker_model_dict['reranker_endpoint']
-        
+
         # Validate query length
         is_valid, error_msg = await asyncio.to_thread(
             validate_query_length, query, emb_endpoint
@@ -247,7 +278,18 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
                     status_code=400,
                     content={"error": error_msg}
                 )
-        
+
+        lang = detect_language(query)
+
+        max_tokens = req.max_tokens
+        # giving priority to max_tokens passed in the request, otherwise according to detected language of query
+        if not max_tokens:
+            max_tokens_map = {
+                lang_en: settings.llm_max_tokens,
+                lang_de: settings.llm_max_tokens_de
+            }
+            max_tokens = max_tokens_map.get(lang, settings.llm_max_tokens)
+
         docs, perf_stat_dict = await asyncio.to_thread(
             search_only,
             query,
@@ -258,7 +300,7 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
             settings.num_chunks_post_reranker,
             vectorstore=vectorstore
         )
-        
+
     except db.VectorStoreNotReadyError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
@@ -266,6 +308,8 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
 
     if not docs:
         message = "No documents found in the knowledge base for this query."
+        if lang == lang_de:
+            message = "Für diese Anfrage wurden keine Dokumente in der Wissensdatenbank gefunden."
         if req.stream:
             async def stream_docs_not_found():
                 yield f"data: {json.dumps({'choices': [{'delta': {'content': message}}]})}\n\n"
@@ -288,21 +332,21 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
     try:
         if req.stream:
             vllm_stream = await asyncio.to_thread(
-                query_vllm_stream, query, docs, llm_endpoint, llm_model, req.stop, req.max_tokens, req.temperature, perf_stat_dict
+                query_vllm_stream, query, docs, llm_endpoint, llm_model, req.stop, max_tokens, req.temperature, perf_stat_dict, lang
             )
             # For streaming, release is handled in locked_stream's finally block
             return StreamingResponse(locked_stream(vllm_stream, perf_stat_dict), media_type="text/event-stream")
         else:
             vllm_non_stream = await asyncio.to_thread(
-                query_vllm_non_stream, query, docs, llm_endpoint, llm_model, req.stop, req.max_tokens, req.temperature, perf_stat_dict
+                query_vllm_non_stream, query, docs, llm_endpoint, llm_model, req.stop, max_tokens, req.temperature, perf_stat_dict, lang
             )
             # Store metrics in registry for non-stream
             perf_registry.add_metric(perf_stat_dict)
-            
+
             # Handle error responses
             if isinstance(vllm_non_stream, dict) and "error" in vllm_non_stream:
                 raise HTTPException(status_code=500, detail=str(vllm_non_stream["error"]))
-            
+
             # Convert vLLM response to ChatCompletionResponse
             if isinstance(vllm_non_stream, dict) and "choices" in vllm_non_stream:
                 choices = []
@@ -313,7 +357,7 @@ async def chat_completion(req: ChatCompletionRequest) -> ChatCompletionResponse 
                             message_content = message_dict.get("content", "")
                             choices.append(ChatChoice(message=ChatMessage(content=message_content)))
                 return ChatCompletionResponse(choices=choices)
-            
+
             # If response doesn't match expected structure, raise an error
             raise HTTPException(status_code=500, detail="Unexpected response format from LLM")
     except Exception as e:
@@ -335,7 +379,7 @@ async def db_status() -> DBStatusResponse:
     try:
         if vectorstore is None:
             return DBStatusResponse(ready=False, message="Vector store not initialized")
-        
+
         status = await asyncio.to_thread(
             vectorstore.check_db_populated
         )

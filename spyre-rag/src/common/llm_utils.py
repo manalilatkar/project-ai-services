@@ -23,6 +23,9 @@ def tqdm_wrapper(iterable, **kwargs):
 settings = get_settings()
 
 SESSION = None
+lang_en = "EN"
+lang_de = "DE"
+
 
 def create_llm_session(pool_maxsize, pool_connections: int = 2, pool_block: bool = True):
     global SESSION
@@ -47,7 +50,7 @@ def create_llm_session(pool_maxsize, pool_connections: int = 2, pool_block: bool
 def summarize_and_classify_single_table(prompt, gen_model, llm_endpoint):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
+
     payload = {
         "model": gen_model,
         "messages": [{"role": "user", "content": prompt}],
@@ -112,7 +115,7 @@ def summarize_and_classify_tables(table_htmls, gen_model, llm_endpoint, pdf_path
 def query_vllm_models(llm_endpoint):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
+
     logger.debug('Querying VLLM models')
     try:
         response = SESSION.get(f"{llm_endpoint}/v1/models")
@@ -130,7 +133,7 @@ def query_vllm_models(llm_endpoint):
     return resp_json
 
 def query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature,
-                stream):
+                stream, lang):
     context = "\n\n".join([doc.get("page_content") for doc in documents])
 
     logger.debug(f'Original Context: {context}')
@@ -140,8 +143,14 @@ def query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words,
     reamining_tokens = settings.max_input_length - (settings.prompt_template_token_count + question_token_count)
     context = detokenize_with_llm(tokenize_with_llm(context, llm_endpoint)[:reamining_tokens], llm_endpoint)
     logger.debug(f"Truncated Context: {context}")
+    # this is extensible to more languages easily
+    prompt_map = {
+        lang_de: "query_vllm_stream_de",
+        lang_en: "query_vllm_stream"
+    }
+    prompt_key = prompt_map.get(lang, "query_vllm_stream")
+    prompt = getattr(settings.prompts, prompt_key).format(context=context, question=question)
 
-    prompt = settings.prompts.query_vllm_stream.format(context=context, question=question)
     logger.debug("PROMPT:  ", prompt)
     headers = {
         "accept": "application/json",
@@ -162,11 +171,11 @@ def query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words,
         payload["stream_options"] = {"include_usage": True}
     return headers, payload
 
-def query_vllm_non_stream(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, perf_stat_dict):
+def query_vllm_non_stream(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, perf_stat_dict, lang):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
-    headers, payload = query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, False )
+
+    headers, payload = query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, False, lang )
     try:
         # Use requests for synchronous HTTP requests
         start_time = time.time()
@@ -189,11 +198,12 @@ def query_vllm_non_stream(question, documents, llm_endpoint, llm_model, stop_wor
         return {"error": str(e)}
     return response_json
 
-def query_vllm_stream(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, perf_stat_dict):
+def query_vllm_stream(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, perf_stat_dict, lang):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
-    headers, payload = query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens, temperature, True )
+
+    headers, payload = query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words, max_new_tokens,
+                                          temperature, True, lang)
     try:
         # Use requests for synchronous HTTP requests
         logger.debug("STREAMING RESPONSE")
@@ -254,7 +264,7 @@ def query_vllm_summarize(
 ):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
+
     headers = {
         "accept": "application/json",
         "Content-type": "application/json",
@@ -308,7 +318,7 @@ def query_vllm_summarize_stream(
     """Stream a summarization request to vLLM, yielding raw SSE lines."""
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
+
     headers = {
         "accept": "application/json",
         "Content-type": "application/json",
@@ -350,7 +360,7 @@ def query_vllm_summarize_stream(
 def tokenize_with_llm(prompt, emb_endpoint):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
+
     payload = {
         "prompt": prompt
     }
@@ -373,7 +383,7 @@ def tokenize_with_llm(prompt, emb_endpoint):
 def detokenize_with_llm(tokens, emb_endpoint):
     if SESSION is None:
         raise RuntimeError("LLM session not initialized. Call create_llm_session() first.")
-    
+
     payload = {
         "tokens": tokens
     }
