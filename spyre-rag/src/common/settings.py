@@ -88,6 +88,7 @@ class Settings:
     num_chunks_post_search: int
     num_chunks_post_reranker: int
     llm_max_tokens: int
+    llm_max_tokens_de: int
     temperature: float
     max_input_length: int
     prompt_template_token_count: int
@@ -103,6 +104,7 @@ class Settings:
         default_num_chunks_post_search = 10
         default_num_chunks_post_reranker = 3
         default_llm_max_tokens = 512
+        default_llm_max_tokens_de = 700
         default_temperature = 0.0
         default_max_input_length = 6000
         default_prompt_template_token_count = 250
@@ -133,6 +135,12 @@ class Settings:
             object.__setattr__(self, "llm_max_tokens", default_llm_max_tokens)
             logger.warning(
                 f"Setting llm_max_tokens to default '{default_llm_max_tokens}' as it is missing or malformed in the settings"
+            )
+
+        if not (isinstance(self.llm_max_tokens_de, int) and self.llm_max_tokens_de > 0):
+            object.__setattr__(self, "llm_max_tokens_de", default_llm_max_tokens_de)
+            logger.warning(
+                f"Setting llm_max_tokens_de to default '{default_llm_max_tokens_de}' as it is missing or malformed in the settings"
             )
 
         if not (isinstance(self.temperature, float) and 0 <= self.temperature < 1):
@@ -175,6 +183,7 @@ class Settings:
             num_chunks_post_search = data.get("num_chunks_post_search"),
             num_chunks_post_reranker = data.get("num_chunks_post_reranker"),
             llm_max_tokens = data.get("llm_max_tokens"),
+            llm_max_tokens_de= data.get("llm_max_tokens_de"),
             temperature = data.get("temperature"),
             max_input_length = data.get ("max_input_length"),
             prompt_template_token_count = data.get("prompt_template_token_count"),
