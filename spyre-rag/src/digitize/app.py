@@ -185,20 +185,21 @@ async def get_all_jobs(
     """Retrieve information about all submitted jobs with pagination and filtering."""
     try:
 
-        # Read and parse all job status files
+        # Read and parse all job status files as JobState objects
         all_jobs = dg_util.read_all_job_files()
 
         # Filter by status if provided
         if status is not None:
-            all_jobs = [j for j in all_jobs if j.get("status") == status.value]
+            all_jobs = [j for j in all_jobs if j.status == status]
 
         # Filter by operation if provided
         if operation is not None:
-            all_jobs = [j for j in all_jobs if j.get("operation") == operation.value]
+            all_jobs = [j for j in all_jobs if j.operation == operation.value]
 
         # Sort by the requested field and direction
         reverse = sort_order == types.SortOrder.DESC
-        all_jobs.sort(key=lambda j: j.get(sort_by.value, ""), reverse=reverse)
+        if sort_by == types.SortBy.SUBMITTED_AT:
+            all_jobs.sort(key=lambda j: j.submitted_at, reverse=reverse)
 
         # If latest=true, return only the most recent job
         if latest and all_jobs:
@@ -209,13 +210,16 @@ async def get_all_jobs(
         # Apply pagination
         paginated_jobs = all_jobs[offset : offset + limit]
 
+        # Convert JobState objects to JSON-compatible dictionaries
+        jobs_data = [job.to_dict() for job in paginated_jobs]
+
         return {
             "pagination": {
                 "total": total,
                 "limit": limit,
                 "offset": offset,
             },
-            "data": paginated_jobs,
+            "data": jobs_data,
         }
     except HTTPException:
         raise
@@ -236,11 +240,13 @@ async def get_job_by_id(job_id: str):
         if not job_status_file.is_file():
             APIError.raise_error(ErrorCode.INTERNAL_SERVER_ERROR, f"Job status path for '{job_id}' is not a valid file")
 
-        job_data = dg_util.read_job_file(job_status_file)
-        if job_data is None:
+        job_state = dg_util.read_job_file(job_status_file)
+        if job_state is None:
             APIError.raise_error(ErrorCode.INTERNAL_SERVER_ERROR, f"Failed to read job status for '{job_id}'")
+            return  # This line should never be reached, but helps type checker
 
-        return job_data
+        # Convert JobState object to JSON-compatible dictionary
+        return job_state.to_dict()
     except HTTPException:
         raise
     except Exception as e:
