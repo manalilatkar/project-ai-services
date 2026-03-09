@@ -425,7 +425,7 @@ SUPPORTED_LANGUAGES = [
     Language.GERMAN
 ]
 
-def init_detector():
+def setup_lang_detector():
     """Call once at app startup, before serving requests."""
     global _detector
     _detector = (
