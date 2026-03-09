@@ -27,3 +27,11 @@ class DocStatus(str, Enum):
     CHUNKED = "chunked"
     COMPLETED = "completed"
     FAILED = "failed"
+
+class SortBy(str, Enum):
+    SUBMITTED_AT = "submitted_at"
+
+
+class SortOrder(str, Enum):
+    ASC = "asc"
+    DESC = "desc"

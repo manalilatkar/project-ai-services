@@ -1,7 +1,8 @@
 import asyncio
+import json
 from functools import partial
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import uuid
 
 from common.misc_utils import get_logger
@@ -92,3 +93,47 @@ async def stage_upload_files(job_id: str, files: List[str], staging_dir: str, fi
         except Exception as e:
             logger.error(f"Unexpected error while staging {filename} for job {job_id}: {e}")
             raise
+
+def read_job_file(file_path: Path) -> Optional[dict]:
+    """
+    Read and parse a single job status JSON file.
+
+    Args:
+        file_path: Path to the job status JSON file.
+
+    Returns:
+        Parsed job data dictionary, or None if the file cannot be read/parsed.
+    """
+    try:
+        with open(file_path, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse job file {file_path.name}: {e}")
+        return None
+    except (IOError, OSError) as e:
+        logger.warning(f"Failed to read job file {file_path.name}: {e}")
+        return None
+
+def read_all_job_files() -> List[dict]:
+    """
+    Read all job status JSON files from the jobs directory.
+
+    Args:
+        jobs_dir: Path to the directory containing job status files.
+
+    Returns:
+        List of parsed job data dictionaries. Files that fail to parse are skipped.
+    """
+
+    if not JOBS_DIR.exists() or not JOBS_DIR.is_dir():
+        return []
+
+    jobs = []
+    for file_path in JOBS_DIR.glob("*_status.json"):
+        if not file_path.is_file():
+            continue
+        job_data = read_job_file(file_path)
+        if job_data is not None:
+            jobs.append(job_data)
+
+    return jobs

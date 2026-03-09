@@ -172,19 +172,81 @@ async def digitize_document(
         logger.error(f"Unexpected error in digitize_document: {e}")
         APIError.raise_error("INTERNAL_SERVER_ERROR", str(e))
 
-@app.get("/v1/documents/jobs")
+@app.get("/v1/jobs")
 async def get_all_jobs(
-    latest: bool = False,
-    limit: int = 20,
-    offset: int = 0,
-    status: Optional[types.JobStatus] = None
+    latest: bool = Query(False, description="Return only the latest job"),
+    limit: int = Query(20, ge=1, le=100, description="Number of records per page"),
+    offset: int = Query(0, ge=0, description="Number of records to skip"),
+    status: Optional[types.JobStatus] = Query(None, description="Filter by job status"),
+    operation: Optional[types.OperationType] = Query(None, description="Filter by operation type"),
+    sort_by: types.SortBy = Query(types.SortBy.SUBMITTED_AT, description="Field to sort by"),
+    sort_order: types.SortOrder = Query(types.SortOrder.DESC, description="Sort direction"),
 ):
-    return {"pagination": {"total": 0, "limit": limit, "offset": offset}, "data": []}
+    """Retrieve information about all submitted jobs with pagination and filtering."""
+    try:
 
-@app.get("/v1/documents/jobs/{job_id}")
+        # Read and parse all job status files
+        all_jobs = dg_util.read_all_job_files()
+
+        # Filter by status if provided
+        if status is not None:
+            all_jobs = [j for j in all_jobs if j.get("status") == status.value]
+
+        # Filter by operation if provided
+        if operation is not None:
+            all_jobs = [j for j in all_jobs if j.get("operation") == operation.value]
+
+        # Sort by the requested field and direction
+        reverse = sort_order == types.SortOrder.DESC
+        all_jobs.sort(key=lambda j: j.get(sort_by.value, ""), reverse=reverse)
+
+        # If latest=true, return only the most recent job
+        if latest and all_jobs:
+            all_jobs = [all_jobs[0]]
+
+        total = len(all_jobs)
+
+        # Apply pagination
+        paginated_jobs = all_jobs[offset : offset + limit]
+
+        return {
+            "pagination": {
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            },
+            "data": paginated_jobs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to retrieve jobs: {e}", exc_info=True)
+        APIError.raise_error(ErrorCode.INTERNAL_SERVER_ERROR, "Failed to retrieve job information")
+
+
+@app.get("/v1/jobs/{job_id}")
 async def get_job_by_id(job_id: str):
-    # Logic to read /var/cache/{job_id}_status.json
-    return {}
+    """Retrieve detailed status of a specific job by its ID."""
+    try:
+        job_status_file = JOBS_DIR / f"{job_id}_status.json"
+
+        if not job_status_file.exists():
+            APIError.raise_error(ErrorCode.RESOURCE_NOT_FOUND, f"No job found with id '{job_id}'")
+
+        if not job_status_file.is_file():
+            APIError.raise_error(ErrorCode.INTERNAL_SERVER_ERROR, f"Job status path for '{job_id}' is not a valid file")
+
+        job_data = dg_util.read_job_file(job_status_file)
+        if job_data is None:
+            APIError.raise_error(ErrorCode.INTERNAL_SERVER_ERROR, f"Failed to read job status for '{job_id}'")
+
+        return job_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to retrieve job {job_id}: {e}", exc_info=True)
+        APIError.raise_error(ErrorCode.INTERNAL_SERVER_ERROR, f"Failed to retrieve job information for '{job_id}'")
+
 
 @app.get("/v1/documents")
 async def list_documents(
