@@ -10,6 +10,8 @@ import uvicorn
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
+
 from common.llm_utils import create_llm_session, query_vllm_summarize, query_vllm_summarize_stream
 from common.misc_utils import get_model_endpoints
 from common.settings import get_settings
@@ -89,10 +91,10 @@ def initialize_models():
     global llm_model_dict
     _, llm_model_dict,_  = get_model_endpoints()
 
-def locked_stream(stream_g):
+async def locked_stream(stream_g):
     """Wrap a vLLM SSE generator, releasing the concurrency semaphore when the stream ends."""
     try:
-        for chunk in stream_g:
+        async for chunk in iterate_in_threadpool(stream_g):
             yield chunk
     finally:
         concurrency_limiter.release()
@@ -282,7 +284,7 @@ async def summarize(request: Request):
 
             if not content_text or not content_text.strip():
                 raise SummarizeException(400, "EMPTY_INPUT",
-                                         "he provided input contains no extractable text.")
+                                         "The provided input contains no extractable text.")
             return await handle_summarize(content_text.strip(), "file", summary_length, stream)
 
         else:

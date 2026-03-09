@@ -321,10 +321,10 @@ def query_vllm_summarize_stream(
         if e.response is not None:
             error_details += f", Response Text: {e.response.text}"
         logger.error(f"Error calling vLLM stream API: {error_details}")
-        return
+        yield error_details
     except Exception as e:
         logger.error(f"Error calling vLLM stream API: {e}")
-        return
+        yield f"Error calling vLLM stream API: {e}"
 
 def tokenize_with_llm(prompt, emb_endpoint):
     payload = {
