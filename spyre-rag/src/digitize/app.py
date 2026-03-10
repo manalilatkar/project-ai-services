@@ -246,7 +246,7 @@ async def get_all_jobs(
 async def get_job_by_id(job_id: str):
     """Retrieve detailed status of a specific job by its ID."""
     try:
-        job_status_file = JOBS_DIR / f"{job_id}_status.json"
+        job_status_file = config.JOBS_DIR / f"{job_id}_status.json"
 
         if not job_status_file.exists():
             APIError.raise_error(ErrorCode.RESOURCE_NOT_FOUND, f"No job found with id '{job_id}'")
@@ -271,7 +271,7 @@ async def get_job_by_id(job_id: str):
 async def delete_job(job_id: str):
     """Deletes a job status file. Does not touch associated document metadata."""
     try:
-        job_status_file = JOBS_DIR / f"{job_id}_status.json"
+        job_status_file = config.JOBS_DIR / f"{job_id}_status.json"
 
         if not job_status_file.exists():
             APIError.raise_error(ErrorCode.RESOURCE_NOT_FOUND, f"No job found with id '{job_id}'")
