@@ -145,10 +145,11 @@ async def handle_summarize(
                 max_tokens=max_tokens,
                 temperature=settings.summarization_temperature,
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"LLM call failed with error: {e}")
             concurrency_limiter.release()
             raise SummarizeException(500, "LLM_ERROR",
-                                     "Failed to generate summary. Please try again later")
+                                     f"Failed to generate summary, error: {e} Please try again later")
         return StreamingResponse(
             locked_stream(vllm_stream),
             media_type="text/event-stream",
@@ -239,7 +240,8 @@ async def summarize(request: Request):
         if "application/json" in content_type:
             try:
                 body = await request.json()
-            except Exception:
+            except Exception as e:
+                logger.error(f"error: {e}")
                 raise SummarizeException(400, "INVALID_JSON",
                                          "Request body is not valid JSON")
 
