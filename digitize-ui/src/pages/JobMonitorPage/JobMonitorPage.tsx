@@ -154,7 +154,7 @@ const jobMonitorReducer = (
 };
 
 const headers = [
-  { key: 'job_name', header: 'Job name' },
+  { key: 'job_name', header: 'Job Name' },
   { key: 'type', header: 'Type' },
   { key: 'status', header: 'Status' },
   { key: 'started', header: 'Started' },
