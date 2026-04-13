@@ -831,3 +831,599 @@ The abstraction levels are now built into the API. UI should present these optio
 - ✅ Strict adherence to requested abstraction level
 - ✅ Better preservation of factual data
 - ✅ More intuitive user experience
+
+
+
+
+====================================================================================================
+
+ADDENDUM FOR ASYNC SUMMARIZATION JOBS
+====================================================================================================
+
+## 1. Overview
+
+
+This document proposes adding **asynchronous job-based summarization** to the existing `/v1/summarize` service. The design mirrors the job lifecycle already implemented in the Digitize Documents service while adapting it to the summarization domain. Users will be able to submit files for background summarization, track progress via job endpoints, and retrieve results when complete.
+
+The existing synchronous `POST /v1/summarize` endpoint remains unchanged. The new job-based flow is additive and operates through a separate set of endpoints under `/v1/summarize/jobs`.
+---
+## 2. Motivation
+
+The current synchronous endpoint works well for short texts and small files, but has limitations for larger workloads:
+
+- Streaming mode partially addresses latency but still requires the client to hold a connection open.
+- There is no persistent record of past summarization requests or results.
+- The synchronous endpoint enforces a `MAX_INPUT_WORDS` limit derived from the model's context window. Documents exceeding this limit cannot be summarized at all, even though a chunk-and-merge strategy can handle them.
+
+An async job model solves all of these while staying consistent with the patterns already established by the digitize service.
+
+---
+## 3. Non-Goals
+
+- **Horizontal scaling:** Like the digitize service, the summarization job system is designed for single-replica deployment.
+- **Replacing the sync endpoint:** `POST /v1/summarize` continues to work as-is for quick, interactive use cases.
+- **Multi-file jobs:** Each job processes exactly one document. Clients that need to summarize multiple files should submit one job per file.
+
+---
+
+## 4. New Endpoints
+
+| Method | Endpoint | Description |
+|:---|:---|:---|
+| **POST** | `/v1/summarize/jobs` | Submit a single file for async summarization. Returns a `job_id`. |
+| **GET** | `/v1/summarize/jobs` | List all summarization jobs with pagination and filters. |
+| **GET** | `/v1/summarize/jobs/{job_id}` | Get detailed status and metadata of a specific job. |
+| **GET** | `/v1/summarize/jobs/{job_id}/result` | Retrieve the summarization result as a sub-resource of the job. |
+| **DELETE** | `/v1/summarize/jobs/{job_id}` | Delete a specific job record and its associated result. |
+| **DELETE** | `/v1/summarize/jobs` | Bulk delete all jobs and results. Requires `confirm=true`. |
+
+> **Design note — endpoint prefix:** The digitize service uses `/v1/jobs` and `/v1/documents` because it is a standalone microservice on its own port (4000). 
+> The summarization service shares a port with its existing `/v1/summarize` endpoint, so the job endpoints are nested under `/v1/summarize/jobs` to avoid collisions and keep the API self-descriptive.
+
+---
+## 5. Endpoint Specifications
+
+### 5.1 POST /v1/summarize/jobs — Create Summarization Job
+
+**Content-Type:** `multipart/form-data`
+
+**Form parameters:**
+
+| Parameter | Type | Required | Description |
+|:---|:---|:---|:---|
+| `file` | file | Yes | A single `.txt` or `.pdf` file to summarize. |
+| `length` | integer | No | Desired summary length in words. |
+| `job_name` | string | No | Optional human-readable label for the job. |
+
+**Validation rules:**
+
+- Exactly one file must be provided.
+- The file must have a `.txt` or `.pdf` extension.
+- There is **no `MAX_INPUT_WORDS` limit** for async jobs. Documents of any size are accepted and handled via the chunked summarization strategy (see Section 6).
+- If `length` is provided, it must be a positive integer within bounds.
+
+**Processing flow:**
+
+1. Validate the file and parameters.
+2. Check the `concurrency_limiter` semaphore. If all 32 slots are occupied, return `429`.
+3. Generate a `job_id` (UUID).
+4. Stage the uploaded file to `/var/cache/summarize/staging/{job_id}/`.
+5. Write `{job_id}_status.json` to `/var/cache/summarize/jobs/` with initial status `accepted`.
+6. Write `{doc_id}_metadata.json` to `/var/cache/summarize/docs/`.
+7. Acquire the semaphore and launch background processing via FastAPI `BackgroundTasks`.
+8. Return `202 Accepted` with `{ "job_id": "..." }`.
+
+**Background worker:**
+
+1. Read the staged file and extract text (PDF via `pypdfium2`, TXT via UTF-8 decode).
+2. Update job status to `in_progress`, document status to `in_progress`.
+3. Compute word count of the extracted text.
+4. Determine summarization strategy based on input size (see Section 6):
+    - If the input fits within the context window → **direct summarization** (single LLM call).
+    - If the input exceeds the context window → **chunked summarization** (chunk → summarize each → merge summaries).
+5. Write the result to `/var/cache/summarize/results/{job_id}_result.json`.
+6. Update job status to `completed` (or `failed` on error).
+7. Clean up staging directory. 
+8. Release the semaphore.
+
+**Response codes:**
+
+| Status | Description |
+|:---|:---|
+| 202 Accepted | Job created successfully. |
+| 400 Bad Request | Missing file, multiple files provided, or invalid `length`. |
+| 415 Unsupported Media Type | File is not a valid `.txt` or `.pdf`. |
+| 429 Too Many Requests | Semaphore at capacity. |
+| 500 Internal Server Error | Unexpected failure. |
+
+**Sample request:**
+
+```bash
+curl -X POST http://localhost:6000/v1/summarize/jobs \
+  -F "file=@report.pdf" \
+  -F "length=200"
+```
+
+**Sample response (202):**
+
+```json
+{
+    "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+---
+### 5.2 GET /v1/summarize/jobs — List All Jobs
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|:---|:---|:---|:---|
+| `latest` | bool | No | Return only the most recent job. Default: `false`. |
+| `limit` | int | No | Records per page (1–100). Default: `20`. |
+| `offset` | int | No | Records to skip. Default: `0`. |
+| `status` | string | No | Filter by status: `accepted`, `in_progress`, `completed`, `failed`. |
+
+**Response codes:**
+
+| Status | Description                    |
+|:---|:-------------------------------|
+| 200 OK | Paginated job list.            |
+| 400 Bad Request | Invalid values of query params |
+| 500 Internal Server Error | Failure reading job files.     |
+
+**Sample request:**
+
+```bash
+curl  http://localhost:6000/v1/summarize/jobs 
+```
+
+**Sample response (200):**
+
+```json
+{
+    "pagination": {
+        "total": 1,
+        "limit": 20,
+        "offset": 0
+    },
+    "data": [
+        {
+            "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "job_name": "Q3 revenue report",
+            "status": "completed",
+            "submitted_at": "2026-03-15T10:30:00Z",
+            "completed_at": "2026-03-15T10:31:45Z"
+        }
+    ]
+}
+```
+---
+### 5.3 GET /v1/summarize/jobs/{job_id} — Get Job Details
+
+Returns full status and metadata of a specific job.
+
+**Response codes:**
+
+| Status | Description |
+|:---|:---|
+| 200 OK | Job details. |
+| 404 Not Found | No job with this ID. |
+| 500 Internal Server Error | Failure reading job file. |
+
+**Sample response (200):**
+
+```json
+{
+    "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "job_name": "Q3 revenue report",
+    "status": "completed",
+    "submitted_at": "2026-03-15T10:30:00Z",
+    "completed_at": "2026-03-15T10:31:45Z",
+    "document": {
+        "name": "report1.pdf",
+        "status": "completed"
+    },
+    "error": null
+}
+```
+---
+### 5.4 DELETE /v1/summarize/jobs/{job_id} — Delete Job Record
+
+Deletes the job status file and the result file. Only `completed` or `failed` jobs may be deleted.
+
+**Response codes:**
+
+| Status | Description |
+|:---|:---|
+| 204 No Content | Job and associated data deleted. |
+| 404 Not Found | No job with this ID. |
+| 409 Conflict | Job is still active (`accepted` or `in_progress`). |
+| 500 Internal Server Error | Unexpected failure. |
+
+---
+
+### 5.5 DELETE /v1/summarize/jobs — Bulk Delete All Jobs
+
+Deletes **all** job status files, document metadata files, result files, and any remaining staging data. This is the summarization equivalent of the digitize service's bulk document delete.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|:---|:---|:---|:---|
+| `confirm` | bool | Yes | Must be `true` to proceed with bulk deletion. |
+
+**Processing flow:**
+
+1. Validate that `confirm=true`.
+2. Check for active jobs. If any job has status `accepted` or `in_progress`, reject with `409`.
+3. Delete all files under `/var/cache/summarize/jobs/`. 
+4. Delete all files under `/var/cache/summarize/results/`. 
+5. Delete any remaining staging directories under `/var/cache/summarize/staging/`. 
+6. Return `204 No Content`.
+
+**Response codes:**
+
+| Status | Description |
+|:---|:---|
+| 204 No Content | Full cleanup completed. |
+| 400 Bad Request | `confirm` is missing or not `true`. |
+| 409 Conflict | An active job exists (`accepted` or `in_progress`). |
+| 500 Internal Server Error | Failure during deletion. |
+
+**Sample request:**
+
+```bash
+curl -X DELETE 'http://localhost:6000/v1/summarize/jobs?confirm=true'
+```
+---
+### 5.6 GET /v1/summarize/jobs/{job_id}/result — Get Summarization Result
+
+
+Returns the completed summary and result metadata for the job.
+
+**Response codes:**
+
+| Status | Description |
+|:---|:---|
+| 200 OK | Summary result. |
+| 202 Accepted | Summarization is still in progress. |
+| 404 Not Found | No job with this ID or result not available. |
+| 500 Internal Server Error | Failure reading result file. |
+
+**Sample response (200):**
+
+```json
+{
+    "data": {
+        "summary": "The quarterly report shows 15% revenue growth driven by cloud adoption...",
+        "original_length": 4200,
+        "summary_length": 180
+    },
+    "meta": {
+        "model": "ibm-granite/granite-3.3-8b-instruct",
+        "processing_time_ms": 3420,
+        "input_type": "file",
+        "strategy": "direct | chunked"
+    },
+    "usage": {
+        "input_tokens": 5600,
+        "output_tokens": 240,
+        "total_tokens": 5840
+    }
+}
+```
+> **Note:** The `meta.strategy` field indicates whether the document was summarized in a single pass (`"direct"`) or via the chunk-and-merge approach (`"chunked"`). 
+> For chunked summarization, `usage` reflects the aggregate token counts across all LLM calls (chunk summaries + final merge).
+---
+
+### 6.2 Strategy Overview
+
+The approach follows a two-phase pipeline:
+
+**Phase 1 — Chunk and Summarize:**
+1. Split the input text into chunks that each fit within the model's context window (accounting for the system prompt and estimated output tokens).
+2. Summarize each chunk independently with a single LLM call, producing a chunk-level summary.
+
+**Phase 2 — Merge:**
+3. Concatenate all chunk-level summaries.
+4. If the combined summaries fit within the context window, make a single final LLM call to produce a unified summary.
+5. If the combined summaries still exceed the context window, fail the job with error `FILE_SIZE_OVER_LIMIT`.
+6. In the future, if there is a demand for extra large files for this service, we can implement to apply Phase 1 recursively.
+
+### 6.3 Decision Logic
+
+```
+input_word_count = word_count(extracted_text)
+input_tokens = input_word_count / TOKEN_TO_WORD_RATIO
+
+if input_tokens + prompt_tokens + estimated_output_tokens <= MAX_MODEL_LEN:
+    → Direct summarization (single LLM call)
+else:
+    → Chunked summarization (multi-pass)
+```
+
+The threshold is the same `MAX_INPUT_WORDS` calculation already used by the sync endpoint — the async path simply uses it as a routing decision rather than a hard rejection.
+
+### 6.4 Chunking Strategy
+
+The input text is split into chunks of 'less than `MAX_INPUT_WORDS`' words each. The chunking approach:
+
+- Splits on paragraph boundaries (double newlines) to preserve coherent units of text.
+- Falls back to sentence boundaries if a single paragraph exceeds the chunk size.
+- Maintains a small overlap (configurable, default ~50 words) between consecutive chunks to preserve context at boundaries.
+
+#### 6.5 Splitting Strategy
+
+The text is split into chunks using a two-level boundary strategy that preserves semantic coherence. The approach mirrors the sentence-level splitting already implemented in the digitize service's `split_text_into_token_chunks` function (`doc_utils.py`), but operates at the paragraph level first.
+
+**Step 1 — Paragraph splitting:**
+
+Split the full text on paragraph boundaries (double newlines `\n\n`). This produces a list of paragraph-sized text blocks that represent natural units of thought.
+
+**Step 2 — Greedy packing with paragraph boundaries:**
+
+Walk the paragraph list and greedily pack consecutive paragraphs into a chunk until adding the next paragraph would exceed `MAX_INPUT_WORDS`. When the limit is reached, finalize the current chunk and start a new one.
+
+**Step 3 — Sentence-level fallback:**
+
+If a single paragraph exceeds `MAX_INPUT_WORDS` on its own (e.g., a very long unbroken block of text), fall back to sentence-level splitting within that paragraph. This uses the `SentenceSplitter` library (already a dependency in the project via `sentence_splitter`) to split the oversized paragraph into sentences, then greedily packs sentences into sub-chunks the same way.
+This fallback is expected to be rare in practice — a single paragraph would need to exceed ~20,000 words. It primarily guards against edge cases like concatenated text extracted from PDFs where paragraph boundaries are lost.
+
+**Step 4 — Overlap:**
+
+To preserve context at chunk boundaries, the last sentence of the previous chunk is prepended to the next chunk. This overlap can be configurable (default: 1 sentence, typically ~20–50 words). The overlap is small enough to not meaningfully reduce the available space for new content, but sufficient to give the model continuity for anaphora resolution and topic transitions.
+
+### 6.6 Merge Prompting
+
+The merge step uses a distinct prompt that instructs the model to combine the chunk summaries into a single coherent summary:
+
+- The system prompt indicates that the input consists of summaries of sequential sections from a single document.
+- The user prompt asks the model to produce a unified summary that preserves the key points from all sections without redundancy.
+- If the user specified a `length` parameter, it is applied to the final merge call (not to individual chunk summaries).
+
+#### 6.6.1 Merge Prompt
+
+**System prompt:**
+
+```
+You are a summarization assistant. You are given a series of summaries, each covering a consecutive section of the same document. Your task is to combine them into a single, unified summary. Output ONLY the summary.
+
+Do not add questions, explanations, headings, code, or any other text.
+```
+
+**User prompt — with length:**
+
+```
+The following are summaries of consecutive sections from a single document.
+Combine them into one unified summary in {target_words} words, with an allowed variance of ±50 words.
+Preserve the key points from all sections. Remove redundancy and ensure the summary reads as a single coherent text, not as a list of section summaries.
+
+Section summaries:
+{merged_chunk_summaries}
+
+Unified summary:
+```
+
+**User prompt — without length:**
+
+```
+The following are summaries of consecutive sections from a single document.
+Combine them into one unified summary.
+Preserve the key points from all sections. Remove redundancy and ensure the summary reads as a single coherent text, not as a list of section summaries.
+
+Section summaries:
+{merged_chunk_summaries}
+
+Unified summary:
+```
+
+### 6.7 Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as Background Worker
+    participant FS as Local Storage
+    participant vLLM as vLLM Endpoint
+
+    Worker->>FS: Read staged file
+    Worker->>Worker: Extract text, compute word count
+
+    alt Fits in context window
+        Note over Worker: Direct summarization
+        Worker->>vLLM: POST /v1/chat/completions (full text)
+        vLLM-->>Worker: Summary
+    else Exceeds context window
+        Note over Worker: Chunked summarization
+        Worker->>Worker: Split text into N chunks
+
+        loop For each chunk
+            Worker->>vLLM: POST /v1/chat/completions (chunk i)
+            vLLM-->>Worker: Chunk summary i
+        end
+
+        Worker->>Worker: Concatenate chunk summaries
+
+        alt Merged summaries fit in context window
+            Worker->>vLLM: POST /v1/chat/completions (merge prompt)
+            vLLM-->>Worker: Final unified summary
+        else Still exceeds (recursive)
+            Worker->>Worker: Re-chunk and repeat
+        end
+    end
+
+    Worker->>Worker: Trim to last sentence
+    Worker->>FS: Write result file
+```
+
+### 6.8 Token Usage Reporting
+
+For chunked summarization, the `usage` field in the result aggregates across all LLM calls:
+
+- `input_tokens`: sum of input tokens from all chunk calls + the merge call.
+- `output_tokens`: sum of output tokens from all chunk calls + the merge call.
+- `total_tokens`: `input_tokens + output_tokens`.
+
+This gives the user an accurate picture of total resource consumption.
+
+### 6.9 Job Status Tracking for Chunked Summarization
+
+For large documents processed via chunking, the job status file tracks progress at a finer granularity:
+
+```json
+{
+    "job_id": "a1b2c3d4-...",
+    "status": "in_progress",
+    "chunking": {
+        "strategy": "chunked",
+        "total_chunks": 12,
+        "completed_chunks": 7,
+        "phase": "summarizing"
+    }
+}
+```
+
+The `chunking` field is only present when the chunked strategy is in use. The `phase` field can be `"summarizing"` (chunk-level summaries in progress) or `"merging"` (producing the final unified summary). This allows clients polling `GET /v1/summarize/jobs/{job_id}` to see meaningful progress for long-running jobs.
+
+---
+
+## 7. Storage Layout
+
+All job-related state is persisted under `/var/cache/summarize/`, which is a persistent volume mounted by the container runtime.
+
+```
+/var/cache/summarize/
+├── staging/
+│   └── {job_id}/
+│       └── report.pdf
+├── jobs/
+│   └── {job_id}_status.json
+└── results/
+    └── {job_id}_result.json
+```
+> **Note:** Compared to the digitize service, there is no separate `docs/` directory. Since each job maps to exactly one document and the result is a sub-resource of the job, a separate document metadata layer is unnecessary. Document-level information (filename, word count, processing time) is stored directly in the job status file and the result file.
+
+### 7.1 Job Status File — `{job_id}_status.json`
+
+```json
+{
+    "job_id": "a1b2c3d4-...",
+    "job_name": "Q3 revenue report",
+    "operation": "summarization",
+    "status": "completed",
+    "submitted_at": "2026-03-15T10:30:00Z",
+    "completed_at": "2026-03-15T10:31:45Z",
+    "summary_length": 200,
+    "document": {
+        "name": "report1.pdf",
+        "status": "completed",
+        "word_count": 4200 
+    },
+    "error": null
+}
+```
+### 7.2 Result File — `{job_id}_result.json`
+
+```json
+{
+    "data": {
+        "summary": "The quarterly report shows...",
+        "original_length": 4200,
+        "summary_length": 180
+    },
+    "meta": {
+        "model": "ibm-granite/granite-3.3-8b-instruct",
+        "processing_time_ms": 3420,
+        "input_type": "file",
+        "strategy": "direct"
+    },
+    "usage": {
+        "input_tokens": 5600,
+        "output_tokens": 240,
+        "total_tokens": 5840
+    }
+}
+```
+**Example result for a chunked summarization:**
+
+```json
+{
+    "data": {
+        "summary": "This comprehensive research paper examines...",
+        "original_length": 45000,
+        "summary_length": 500
+    },
+    "meta": {
+        "model": "ibm-granite/granite-3.3-8b-instruct",
+        "processing_time_ms": 28500,
+        "input_type": "file",
+        "strategy": "chunked",
+        "chunks_processed": 5
+    },
+    "usage": {
+        "input_tokens": 62000,
+        "output_tokens": 3200,
+        "total_tokens": 65200
+    }
+}
+```
+---
+
+## 8. Concurrency Limiting
+
+Both the synchronous `POST /v1/summarize` endpoint and the async job background worker share a **single** `BoundedSemaphore` that limits total concurrent vLLM connections to 32, matching the existing design:
+
+```python
+concurrency_limiter = asyncio.BoundedSemaphore(settings.max_concurrent_requests)  # default: 32
+```
+
+The sync endpoint already acquires this semaphore before calling vLLM (either via `async with concurrency_limiter` for non-streaming or explicit `acquire`/`release` for streaming). The async job background worker follows the same pattern — it acquires the semaphore before its LLM call and releases it afterward.
+
+**Behavior:**
+
+- The semaphore is checked with `concurrency_limiter.locked()` at request time. If all 32 slots are occupied (by any mix of sync requests and async job workers), the incoming request is rejected with `429`.
+- For the `POST /v1/summarize/jobs` endpoint, the semaphore is acquired before launching the background task. The worker holds the slot for the duration of its single LLM call and releases it once the response is received and the result is written. This means an async job consumes exactly one of the 32 slots while it is actively calling vLLM, leaving the remaining slots available for sync requests.
+- There is no separate job-level semaphore. The shared semaphore is sufficient because each job processes a single document with a single LLM call, so it behaves identically to a sync request from the vLLM connection perspective.
+
+---
+
+## 9. Recovery Strategy
+
+Identical to the digitize service:
+
+1. **Boot-up scan:** On startup, the FastAPI app scans `/var/cache/summarize/jobs/*.json`.
+2. **Identify zombies:** Any job with status `accepted` or `in_progress` is a zombie (no worker is handling it after a restart).
+3. **Mark as failed:** Update those jobs to `status: failed` with error `"System restarted during processing"`.
+4. **Cleanup:** Delete corresponding staging directories under `/var/cache/summarize/staging/`.
+
+---
+
+## 10. Test Cases
+
+| Test Case | Input | Expected Result |
+|:---|:---|:---|
+| Submit single PDF | 1 PDF file | 202 with job_id, eventually completes |
+| Submit single TXT | 1 TXT file | 202 with job_id, eventually completes |
+| Submit with custom length | file + `length=100` | 202, summary targets ~100 words |
+| Submit multiple files | 2 files in one request | 400 `INVALID_REQUEST` |
+| No file attached | Empty request | 400 `INVALID_REQUEST` |
+| Unsupported file type | `.docx` file | 400 `UNSUPPORTED_FILE_TYPE` |
+| Corrupt PDF | Invalid bytes with `.pdf` ext | 415 `UNSUPPORTED_MEDIA_TYPE` |
+| Semaphore exhausted | Submit while all 32 slots busy | 429 `RATE_LIMIT_EXCEEDED` |
+| Small file (direct) | File within `MAX_INPUT_WORDS` | 202, result has `strategy: "direct"` |
+| Large file (chunked) | File exceeding `MAX_INPUT_WORDS` | 202, result has `strategy: "chunked"` |
+| Very large file (recursive) | File requiring recursive merge | 202, completes with correct aggregate usage |
+| Job progress (chunked) | Poll during chunked processing | 200, shows `chunking.completed_chunks` incrementing |
+| Get job status | Valid `job_id` | 200 with current status and document info |
+| Get nonexistent job | Random UUID | 404 `RESOURCE_NOT_FOUND` |
+| Get result via sub-resource | `GET /v1/summarize/jobs/{id}/result` | 200 with summary data |
+| Get result (in progress) | In-progress `job_id` | 202 Accepted |
+| Get result (not found) | Random UUID | 404 `RESOURCE_NOT_FOUND` |
+| Delete completed job | Completed `job_id` | 204 No Content, result file also deleted |
+| Delete active job | In-progress `job_id` | 409 `RESOURCE_LOCKED` |
+| Bulk delete (confirm=true) | No active jobs | 204 No Content, all data removed |
+| Bulk delete (confirm=false) | `confirm=false` | 400 `INVALID_REQUEST` |
+| Bulk delete (active job) | An in-progress job exists | 409 `RESOURCE_LOCKED` |
+| Recovery after crash | Kill during processing | On restart, zombie jobs marked `failed` |
+
+---
