@@ -271,7 +271,6 @@ def get_doc_converter():
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
     # Accelerator & pipeline options
     pipeline_options = PdfPipelineOptions()
@@ -296,7 +295,7 @@ def get_doc_converter():
         allowed_formats=[
             InputFormat.PDF
         ],
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options, backend=PyPdfiumDocumentBackend)}
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
 
     return doc_converter
