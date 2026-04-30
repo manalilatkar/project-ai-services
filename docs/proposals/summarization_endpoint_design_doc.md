@@ -889,11 +889,11 @@ An async job model solves all of these while staying consistent with the pattern
 
 **Form parameters:**
 
-| Parameter | Type | Required | Description |
-|:---|:---|:---|:---|
-| `file` | file | Yes | A single `.txt` or `.pdf` file to summarize. |
-| `level` | string | Optional | Abstraction level for summary: `brief`, `standard`, or `detailed`. Length is automatically calculated based on input size and level. If not specified, the model determines the summary length automatically. |
-| `job_name` | string | No | Optional human-readable label for the job. |
+| Parameter | Type | Required | Description                                                                                                                                                                                 |
+|:---|:---|:---------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `file` | file | Yes      | A single `.txt` or `.pdf` file to summarize.                                                                                                                                                |
+| `level` | string | No       | Abstraction level for summary: `brief`, `standard`, or `detailed`. Length is automatically calculated based on input size and level. If not specified, the `standard` option will be default. |
+| `job_name` | string | No       | Optional human-readable label for the job.                                                                                                                                                  |
 
 
 **Validation rules:**
@@ -916,7 +916,7 @@ An async job model solves all of these while staying consistent with the pattern
 **Background worker:**
 
 1. Read the staged file and extract text (PDF via `pypdfium2`, TXT via UTF-8 decode).
-2. Update job row: `status = 'in_progress'`, `document_original_word_count = <word_count>`.
+2. Update job row: `status = 'in_progress'`, `document_word_count = <word_count>`.
 3. Determine summarization strategy based on input size (see Section 6):
     - If the input fits within the context window → **direct summarization** (single LLM call).
     - If the input exceeds the context window → **chunked summarization** (chunk → summarize each → merge summaries).
@@ -1129,7 +1129,7 @@ The approach follows a two-phase pipeline:
 
 **Phase 1 — Chunk and Summarize:**
 1. Split the input text into chunks that each fit within the model's context window (accounting for the system prompt and estimated output tokens).
-2. If the combined estimated summaries of all chunks exceed the context window, fail the job with error `FILE_SIZE_OVER_LIMIT`.
+2. If the combined estimated summaries (calculated in 6.3 as max_tokens) of all chunks exceed the context window, fail the job with error `FILE_SIZE_OVER_LIMIT`.
 3. Summarize each chunk independently with a single LLM call, producing a chunk-level summary.
 
 **Phase 2 — Merge:**
@@ -1141,9 +1141,10 @@ The approach follows a two-phase pipeline:
 
 ```
 input_word_count = word_count(extracted_text)
-input_tokens = input_word_count / TOKEN_TO_WORD_RATIO
-
-if input_tokens + prompt_tokens + estimated_output_tokens <= MAX_MODEL_LEN:
+input_tokens = tokenize_with_llm(extracted_text, llm_endpoint)
+_, _, _, max_tokens = compute_target_and_max_tokens(
+            input_tokens, input_word_count, level)
+if input_tokens + prompt_tokens + max_tokens <= MAX_MODEL_LEN:
     → Direct summarization (single LLM call)
 else:
     → Chunked summarization (multi-pass)
@@ -1180,15 +1181,19 @@ This fallback is expected to be rare in practice — a single paragraph would ne
 
 To preserve context at chunk boundaries, the last sentence of the previous chunk is prepended to the next chunk. This overlap can be configurable (default: 1 sentence, typically ~20–50 words). The overlap is small enough to not meaningfully reduce the available space for new content, but sufficient to give the model continuity for anaphora resolution and topic transitions.
 
-### 6.6 Merge Prompting
+### 6.6 Chunk Prompting
+
+The prompt used for summarizing individual chunks will be same as the current prompt for synchronous summarization requests. If the user specified a `level` parameter, it is applied to all the individual chunk summaries.
+
+### 6.7 Merge Prompting
 
 The merge step uses a distinct prompt that instructs the model to combine the chunk summaries into a single coherent summary:
 
 - The system prompt indicates that the input consists of summaries of sequential sections from a single document.
 - The user prompt asks the model to produce a unified summary that preserves the key points from all sections without redundancy.
-- If the user specified a `level` parameter, it is applied to the final merge call (not to individual chunk summaries).
+- If the user specified a `level` parameter, it is applied to the final merge call as well as individual chunk summaries.
 
-#### 6.6.1 Merge Prompt
+#### 6.7.1 Merge Prompt
 
 **System prompt:**
 
@@ -1198,7 +1203,7 @@ You are a summarization assistant. You are given a series of summaries, each cov
 Do not add questions, explanations, headings, code, or any other text.
 ```
 
-**User prompt — with level:**
+**User prompt:**
 
 ```
 The following are summaries of consecutive sections from a single document.
@@ -1219,67 +1224,53 @@ Section summaries:
 Unified summary:
 ```
 
-**User prompt — without level:**
-
-```
-The following are summaries of consecutive sections from a single document.
-Combine them into one unified summary.
-Preserve the key points from all sections. Remove redundancy and ensure the summary reads as a single coherent text, not as a list of section summaries.
-CRITICAL INSTRUCTIONS:\n
-    1. Use the FULL available space by including:\n
-       - All key findings and main points\n
-       - Supporting details and context\n
-       - Relevant data and statistics\n
-       - Implications and significance\n
-    2. Preserve ALL numerical data EXACTLY\n
-Section summaries:
-{merged_chunk_summaries}
-
-Unified summary:
-```
-> **Note:** Prompt for the individual chunked summaries will be same as asynchronous summarization.
-
-
-### 6.7 Sequence Diagram
+### 6.8 Sequence Diagram
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Worker as Background Worker
-    participant FS as Local Storage
+    participant FS as Local Storage / DB
     participant vLLM as vLLM Endpoint
 
     Worker->>FS: Read staged file
-    Worker->>Worker: Extract text, compute word count
+    Worker->>Worker: Extract text
+    Worker->>vLLM: Tokenize text (get input_tokens)
+    vLLM-->>Worker: input_tokens count
+    Worker->>Worker: compute_target_and_max_tokens(input_tokens, word_count, level)
 
-    alt Fits in context window
+    alt input_tokens + prompt_tokens + max_tokens <= MAX_MODEL_LEN
         Note over Worker: Direct summarization
         Worker->>vLLM: POST /v1/chat/completions (full text)
         vLLM-->>Worker: Summary
     else Exceeds context window
         Note over Worker: Chunked summarization
         Worker->>Worker: Split text into N chunks
+        Worker->>Worker: Estimate total summary tokens (N × chunk_max_tokens)
 
-        loop For each chunk
-            Worker->>vLLM: POST /v1/chat/completions (chunk i)
-            vLLM-->>Worker: Chunk summary i
-        end
+        alt Estimated combined summaries exceed context window
+            Worker->>FS: Update job status → failed (FILE_SIZE_OVER_LIMIT)
+            Note over Worker: Job ends — file too large
+        else Estimated combined summaries fit
+            loop For each chunk (i = 1 to N)
+                Worker->>vLLM: POST /v1/chat/completions (chunk i)
+                vLLM-->>Worker: Chunk summary i
+                Worker->>FS: Update chunking progress (completed_chunks = i)
+            end
 
-        Worker->>Worker: Concatenate chunk summaries
-
-        alt Merged summaries fit in context window
-            Worker->>vLLM: POST /v1/chat/completions (merge prompt)
+            Worker->>Worker: Concatenate chunk summaries
+            Worker->>FS: Update chunking phase → merging
+            Worker->>vLLM: POST /v1/chat/completions (merge prompt + level)
             vLLM-->>Worker: Final unified summary
-        else Still exceeds (recursive)
-            Worker->>Worker: Re-chunk and repeat
         end
     end
 
     Worker->>Worker: Trim to last sentence
     Worker->>FS: Write result file
+    Worker->>FS: Update job status → completed
 ```
 
-### 6.8 Token Usage Reporting
+### 6.9 Token Usage Reporting
 
 For chunked summarization, the `usage` field in the result aggregates across all LLM calls:
 
@@ -1289,25 +1280,22 @@ For chunked summarization, the `usage` field in the result aggregates across all
 
 This gives the user an accurate picture of total resource consumption.
 
-### 6.9 Job Status Tracking for Chunked Summarization
+### 6.10 Job Status Tracking for Chunked Summarization
 
-For large documents processed via chunking, the summarize_jobs table tracks progress at a finer granularity:
+For large documents processed via chunking, the summarize_jobs table tracks progress at a finer granularity through metadata field:
 
 ```json
 {
     "job_id": "a1b2c3d4-...",
     "status": "in_progress",
-    "chunking": {
-        "strategy": "chunked",
+    "job_type": "chunked",
+    "metadata": {
         "total_chunks": 12,
         "completed_chunks": 7,
         "phase": "summarizing"
     }
 }
 ```
-
-The `chunking` field is only present when the chunked strategy is in use. The `phase` field can be `"summarizing"` (chunk-level summaries in progress) or `"merging"` (producing the final unified summary). This allows clients polling `GET /v1/summarize/jobs/{job_id}` to see meaningful progress for long-running jobs.
-
 ---
 
 ## 7. Storage Layout
@@ -1361,14 +1349,16 @@ class SummarizeJob(Base):
 
     # Document info (inlined — one job = one document)
     document_name = Column(String(500), nullable=False)
-    document_original_word_count = Column(Integer, nullable=True)
+    document_word_count = Column(Integer, nullable=True)
 
     # Summarization parameters
     level = Column(String(20), nullable=False, default='standard')
-
-    # Chunking progress (null when strategy is "direct")
-    chunking = Column(JSONB, nullable=True)
-    # Example: {"strategy": "chunked", "total_chunks": 12, "completed_chunks": 7, "phase": "summarizing"}
+    job_type = Column(String(20), nullable=False, default='direct')
+    # type of job: direct/chunked
+    
+    metadata = Column(JSONB, nullable=True)
+    # Chunking progress and other metadata
+    # Example: {"total_chunks": 12, "completed_chunks": 7, "phase": "summarizing"}
 
     # Timestamps
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -1383,33 +1373,36 @@ class SummarizeJob(Base):
             "level IN ('brief', 'standard', 'detailed')",
             name='chk_summarize_job_level'
         ),
+        CheckConstraint(
+            "job_type IN ('direct', 'chunked')",
+            name='chk_summarize_job_type'
+        ),
         Index('idx_summarize_jobs_submitted_at_status', 'submitted_at', 'status'),
     )
 ```
 
 #### 7.2.2 Column Details
 
-| Column | Type | Nullable | Description |
-|:---|:---|:---|:---|
-| `job_id` | `String(255)` | No (PK) | UUID generated at job creation. |
-| `job_name` | `String(500)` | Yes | Optional human-readable label provided by the user. |
-| `status` | `String(50)` | No | One of: `accepted`, `in_progress`, `completed`, `failed`. |
-| `submitted_at` | `DateTime(tz)` | No | Timestamp when the job was created. |
-| `completed_at` | `DateTime(tz)` | Yes | Timestamp when the job finished (completed or failed). `NULL` while active. |
-| `error` | `Text` | Yes | Error message if the job failed. `NULL` on success. |
-| `document_name` | `String(500)` | No | Original filename of the uploaded file (e.g., `report.pdf`). |
-| `document_original_word_count` | `Integer` | Yes | Word count of the extracted text. Set after text extraction, `NULL` before. |
-|`level`     | `String(20)`   | No | Summarization detail level. One of: brief, standard, detailed. Defaults to standard.|
-| `chunking` | `JSONB` | Yes | Chunk progress metadata. `NULL` for direct summarization. See below. |
-| `updated_at` | `DateTime(tz)` | No | Auto-updated by the database on every row modification. |
+| Column                | Type | Nullable | Description                                                                          |
+|:----------------------|:---|:---|:-------------------------------------------------------------------------------------|
+| `job_id`              | `String(255)` | No (PK) | UUID generated at job creation.                                                      |
+| `job_name`            | `String(500)` | Yes | Optional human-readable label provided by the user.                                  |
+| `status`              | `String(50)` | No | One of: `accepted`, `in_progress`, `completed`, `failed`.                            |
+| `submitted_at`        | `DateTime(tz)` | No | Timestamp when the job was created.                                                  |
+| `completed_at`        | `DateTime(tz)` | Yes | Timestamp when the job finished (completed or failed). `NULL` while active.          |
+| `error`               | `Text` | Yes | Error message if the job failed. `NULL` on success.                                  |
+| `document_name`       | `String(500)` | No | Original filename of the uploaded file (e.g., `report.pdf`).                         |
+| `document_word_count` | `Integer` | Yes | Word count of the extracted text. Set after text extraction, `NULL` before.          |
+| `level`               | `String(20)`   | No | Summarization detail level. One of: brief, standard, detailed. Defaults to standard. |
+| `metadata`            | `JSONB` | Yes | Job progress metadata.                                                               |
+| `updated_at`          | `DateTime(tz)` | No | Auto-updated by the database on every row modification.                              |
 
-#### 7.2.3 `chunking` JSONB Schema
+#### 7.2.3 `metadata` JSONB Schema
 
-When the document exceeds `MAX_INPUT_WORDS` and the chunked strategy is used, the `chunking` column is populated:
+When the document exceeds `MAX_INPUT_WORDS` and the chunked strategy is used, the `metadata` column is populated. This column can be used to store any other metadata we later want to introduce:
 
 ```json
 {
-    "strategy": "chunked",
     "total_chunks": 12,
     "completed_chunks": 7,
     "phase": "summarizing"
@@ -1418,12 +1411,9 @@ When the document exceeds `MAX_INPUT_WORDS` and the chunked strategy is used, th
 
 | Field | Type | Description |
 |:---|:---|:---|
-| `strategy` | string | Always `"chunked"` when present. |
 | `total_chunks` | integer | Number of chunks the document was split into. |
 | `completed_chunks` | integer | Number of chunks summarized so far. Updated after each chunk LLM call. |
 | `phase` | string | `"summarizing"` (chunk-level summaries in progress) or `"merging"` (producing the final unified summary). |
-
-For direct summarization (document fits in context window), the `chunking` column remains `NULL`.
 
 #### 7.2.4 Index Strategy
 
@@ -1485,16 +1475,18 @@ Result files remain on disk at `/var/cache/summarize/results/{job_id}_result.jso
 
 ### 7.4 Lifecycle of Storage Artifacts
 
-| Artifact | Created at | Updated during | Deleted at |
-|:---|:---|:---|:---|
-| `summarize_jobs` row | `POST /v1/summarize/jobs` (status: `accepted`) | Background worker updates `status`, `chunking`, `completed_at`, `error`, `document_original_word_count` | `DELETE /v1/summarize/jobs/{job_id}` or bulk `DELETE /v1/summarize/jobs?confirm=true` |
-| Staging file | `POST /v1/summarize/jobs` | — | Background worker deletes after job completes/fails |
-| Result file | Background worker writes after successful summarization | — | `DELETE /v1/summarize/jobs/{job_id}` or bulk delete |
+| Artifact | Created at | Updated during                                                                                 | Deleted at |
+|:---|:---|:-----------------------------------------------------------------------------------------------|:---|
+| `summarize_jobs` row | `POST /v1/summarize/jobs` (status: `accepted`) | Background worker updates `status`, `chunking`, `completed_at`, `error`, `document_word_count` | `DELETE /v1/summarize/jobs/{job_id}` or bulk `DELETE /v1/summarize/jobs?confirm=true` |
+| Staging file | `POST /v1/summarize/jobs` | —                                                                                              | Background worker deletes after job completes/fails |
+| Result file | Background worker writes after successful summarization | —                                                                                              | `DELETE /v1/summarize/jobs/{job_id}` or bulk delete |
 
 
 ---
 
 ## 8. Concurrency Limiting
+
+### 8.1 vLLM Connection Semaphore
 
 Both the synchronous `POST /v1/summarize` endpoint and the async job background worker share a **single** `BoundedSemaphore` that limits total concurrent vLLM connections to 32, matching the existing design:
 
@@ -1502,15 +1494,57 @@ Both the synchronous `POST /v1/summarize` endpoint and the async job background 
 concurrency_limiter = asyncio.BoundedSemaphore(settings.max_concurrent_requests)  # default: 32
 ```
 
-The sync endpoint already acquires this semaphore before calling vLLM (either via `async with concurrency_limiter` for non-streaming or explicit `acquire`/`release` for streaming). The async job background worker follows the same pattern — it acquires the semaphore before its LLM call and releases it afterward.
+The sync endpoint already acquires this semaphore before calling vLLM (either via `async with concurrency_limiter` for non-streaming or explicit `acquire`/`release` for streaming). The async job background worker follows the same pattern — it acquires the semaphore before each LLM call and releases it afterward.
 
 **Behavior:**
 
 - The semaphore is checked with `concurrency_limiter.locked()` at request time. If all 32 slots are occupied (by any mix of sync requests and async job workers), the incoming request is rejected with `429`.
-- For the `POST /v1/summarize/jobs` endpoint, the semaphore is acquired before launching the background task. The worker holds the slot for the duration of its single LLM call and releases it once the response is received and the result is written. This means an async job consumes exactly one of the 32 slots while it is actively calling vLLM, leaving the remaining slots available for sync requests.
-- There is no separate job-level semaphore. The shared semaphore is sufficient because each job processes a single document with a single LLM call, so it behaves identically to a sync request from the vLLM connection perspective.
+- For direct summarization, the worker acquires a single slot, makes one LLM call, and releases it.
+- For chunked summarization, each individual chunk LLM call acquires and releases the semaphore independently (see 8.2 below). This allows sync requests and other jobs to interleave between chunk calls.
+- There is no separate job-level semaphore. The shared semaphore is sufficient because it governs vLLM connection concurrency, which is the actual bottleneck.
 
----
+### 8.2 Parallel Chunk Summarization
+
+To reduce wall-clock time for large documents, the background worker summarizes chunks **in parallel** using a configurable thread pool:
+
+```python
+SUMMARIZE_CHUNK_PARALLELISM =  4
+```
+
+Instead of processing chunks sequentially (chunk 1 → wait → chunk 2 → wait → ...), the worker submits up to `SUMMARIZE_CHUNK_PARALLELISM` chunk summarization tasks concurrently. Each task independently acquires a slot from the shared `concurrency_limiter` before calling vLLM.
+
+
+**How the two semaphores interact:**
+
+| Semaphore | Scope | Limit | Purpose |
+|:---|:---|:---|:---|
+| `chunk_semaphore` | Per job | 4 (configurable) | Caps how many chunks a single job can process simultaneously. Prevents one large job from flooding the vLLM pool. |
+| `concurrency_limiter` | Global (shared) | 32 | Caps total concurrent vLLM connections across all sync requests and async jobs. Each chunk call acquires this before hitting vLLM. |
+
+The two semaphores are nested: a chunk task first acquires the per-job `chunk_semaphore` (ensuring at most 4 chunks are active for this job), then acquires the global `concurrency_limiter` (ensuring total vLLM load stays within 32). If the system is heavily loaded, chunk tasks will block on the global semaphore and gracefully wait for a slot rather than failing.
+
+**Capacity impact:**
+
+- A single chunked job uses at most 4 out of 32 vLLM slots (12.5%), leaving 28 slots available for sync requests and other jobs.
+- Under light load, all 4 chunk calls run truly in parallel, cutting wall-clock time by ~4x.
+- Under heavy load (e.g., 30 of 32 slots occupied by sync requests), only 2 chunk calls can run concurrently — the other 2 block on the global semaphore. The job still completes, just more slowly.
+- The merge step (single LLM call after all chunks complete) acquires one global semaphore slot as usual.
+
+**Worked example — 10-chunk document under light load:**
+
+| Time slot | Active chunks | Semaphore slots used |
+|:---|:---|:---|
+| T1 | chunks 1, 2, 3, 4 | 4 / 32 |
+| T2 | chunks 5, 6, 7, 8 | 4 / 32 |
+| T3 | chunks 9, 10 | 2 / 32 |
+| T4 | merge call | 1 / 32 |
+
+Total: 4 rounds instead of 11 sequential calls. Approximately **3–4x speedup**.
+
+**Progress tracking with parallelism:**
+
+Since chunks complete in non-deterministic order, the `completed_chunks` counter in the `chunking` JSONB column increments in bursts rather than linearly. The update is guarded by an `asyncio.Lock` to ensure atomicity. Clients polling `GET /v1/summarize/jobs/{job_id}` will see the counter jump (e.g., 0 → 3 → 4 → 7 → 10) rather than incrementing one by one. This is cosmetic — correctness is unaffected.
+
 
 ## 9. Recovery Strategy
 
