@@ -3,7 +3,7 @@ Shared pytest fixtures and configuration for chatbot tests.
 """
 
 import pytest
-from unittest.mock import Mock, MagicMock, AsyncMock
+from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from fastapi.testclient import TestClient
 from typing import Dict, List
 import sys
@@ -12,6 +12,20 @@ from pathlib import Path
 # Add src directory to path for imports
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def mock_diagnostic_crash_handler():
+    """
+    Mock crash handler setup for the full test session.
+
+    This prevents diagnostic stderr monitoring from replacing file descriptors
+    during imports of application modules, which conflicts with pytest capture
+    and can trigger "OSError: [Errno 29] Illegal seek" on macOS.
+    """
+    mocked_tuple = (Mock(name="diagnostic_logger"), Mock(stop=Mock()), Mock(name="signal_handler"))
+    with patch("common.diagnostic_logger.setup_comprehensive_crash_handler", return_value=mocked_tuple):
+        yield mocked_tuple
 
 
 @pytest.fixture
