@@ -3,6 +3,11 @@ on:
   push:
     paths:
       - 'images/caddy/**'
+    branches:
+      - main
+  pull_request:
+    paths:
+      - 'images/caddy/**'
       - '.github/workflows/caddy-image.yml'
     branches:
       - main
