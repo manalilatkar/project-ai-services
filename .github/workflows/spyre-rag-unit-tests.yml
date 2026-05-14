@@ -24,7 +24,7 @@ jobs:
       
       - name: Install test dependencies
         run: |
-          pip install -r requirements.txt \
+          pip install -r requirements-test.txt \
           --extra-index-url https://wheels.developerfirst.ibm.com/ppc64le/linux \
           --prefer-binary
         working-directory: spyre-rag
