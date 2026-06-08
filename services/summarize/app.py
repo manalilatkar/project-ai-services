@@ -588,38 +588,77 @@ async def process_summarization_job(job_id: str, level):
             num_chunks = len(chunks)
             logger.info(f"Split into {num_chunks} chunks")
             
-            # Calculate chunk-level token values
-            # Use actual tokenization of the first chunk to get accurate token count
-            sample_chunk = chunks[0] if chunks else ""
-            chunk_tokens = await asyncio.to_thread(
-                tokenize_with_llm,
-                sample_chunk,
-                llm_endpoint
+            # Calculate token values for each chunk individually
+            chunk_token_info = []
+            total_estimated_summary_tokens = 0
+            
+            for i, chunk in enumerate(chunks):
+                chunk_tokens = await asyncio.to_thread(
+                    tokenize_with_llm,
+                    chunk,
+                    llm_endpoint
+                )
+                chunk_input_tokens = len(chunk_tokens)
+                chunk_available_output_tokens = (
+                    get_llm_max_model_len()
+                    - chunk_input_tokens
+                    - settings.summarize.summarization_prompt_token_count
+                )
+                
+                # Compute chunk-level target and max tokens
+                chunk_target_words, chunk_min_words, chunk_max_words, chunk_max_tokens = compute_target_and_max_tokens(
+                    chunk_input_tokens,
+                    chunk_available_output_tokens,
+                    level,
+                    None
+                )
+                
+                chunk_token_info.append({
+                    'input_tokens': chunk_input_tokens,
+                    'available_output_tokens': chunk_available_output_tokens,
+                    'target_words': chunk_target_words,
+                    'min_words': chunk_min_words,
+                    'max_words': chunk_max_words,
+                    'max_tokens': chunk_max_tokens
+                })
+                
+                total_estimated_summary_tokens += chunk_max_tokens
+                
+                logger.debug(
+                    f"Chunk {i+1}/{num_chunks} tokens: input={chunk_input_tokens}, "
+                    f"available_output={chunk_available_output_tokens}, "
+                    f"max_tokens={chunk_max_tokens}"
+                )
+            
+            logger.info(
+                f"Total estimated summary tokens from all chunks: {total_estimated_summary_tokens}"
             )
-            chunk_input_tokens = len(chunk_tokens)
-            chunk_available_output_tokens = (
+            
+            # Pre-check: Estimate if combined summaries will fit in merge step
+            # Calculate merge max_tokens based on estimated combined summary size
+            merge_input_estimate = total_estimated_summary_tokens
+            merge_available_estimate = (
                 get_llm_max_model_len()
-                - chunk_input_tokens
+                - merge_input_estimate
                 - settings.summarize.summarization_prompt_token_count
             )
             
-            # Compute chunk-level target and max tokens
-            chunk_target_words, chunk_min_words, chunk_max_words, chunk_max_tokens = compute_target_and_max_tokens(
-                chunk_input_tokens,
-                chunk_available_output_tokens,
+            # Use compute_target_and_max_tokens to calculate merge max_tokens consistently
+            _, _, _, merge_max_tokens_estimate = compute_target_and_max_tokens(
+                merge_input_estimate,
+                merge_available_estimate,
                 level,
                 None
             )
             
-            logger.info(
-                f"Chunk-level tokens: input={chunk_input_tokens}, "
-                f"available_output={chunk_available_output_tokens}, "
-                f"max_tokens={chunk_max_tokens}"
-            )
+            merge_required_tokens = merge_input_estimate + settings.summarize.summarization_prompt_token_count + merge_max_tokens_estimate
             
-            # Pre-check: Estimate if combined summaries will fit
-            estimated_chunk_summary_tokens = estimate_chunk_summary_tokens(num_chunks, chunk_max_tokens)
-            merge_required_tokens = estimated_chunk_summary_tokens + settings.summarize.summarization_prompt_token_count + max_tokens
+            logger.info(
+                f"Merge pre-check: estimated_input={merge_input_estimate}, "
+                f"estimated_max_tokens={merge_max_tokens_estimate}, "
+                f"total_required={merge_required_tokens}, "
+                f"context_window={get_llm_max_model_len()}"
+            )
             
             if merge_required_tokens > get_llm_max_model_len():
                 raise Exception(
@@ -649,9 +688,18 @@ async def process_summarization_job(job_id: str, level):
             async def process_chunk(chunk_text: str, chunk_index: int):
                 nonlocal total_input_tokens, total_output_tokens
                 
+                # Get token info for this specific chunk
+                chunk_info = chunk_token_info[chunk_index]
+                
                 async with chunk_semaphore:  # Per-job parallelism limit
-                    # Build messages for this chunk using chunk-level token values
-                    chunk_messages = build_messages(chunk_text, chunk_target_words, chunk_min_words, chunk_max_words, True)
+                    # Build messages for this chunk using its specific token values
+                    chunk_messages = build_messages(
+                        chunk_text,
+                        chunk_info['target_words'],
+                        chunk_info['min_words'],
+                        chunk_info['max_words'],
+                        True
+                    )
                     
                     async with concurrency_limiter:  # Global vLLM limit
                         chunk_result, chunk_in_tokens, chunk_out_tokens = await asyncio.to_thread(
@@ -659,7 +707,7 @@ async def process_summarization_job(job_id: str, level):
                             llm_endpoint=llm_endpoint,
                             messages=chunk_messages,
                             model=llm_model,
-                            max_tokens=chunk_max_tokens,
+                            max_tokens=chunk_info['max_tokens'],
                             temperature=settings.summarize.summarization_temperature,
                         )
                     
@@ -681,6 +729,7 @@ async def process_summarization_job(job_id: str, level):
                             db_repo.update_job(job_id, metadata=current_metadata)
                     
                     logger.info(f"Completed chunk {chunk_index + 1}/{num_chunks}")
+                    logger.info(f"Chunk summary: {chunk_summary}")
                     return chunk_summary
             
             # Process all chunks in parallel
