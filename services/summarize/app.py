@@ -436,10 +436,9 @@ async def process_summarization_job(job_id: str, level):
     import json
     from datetime import datetime, timezone
     from summarize.db.manager import db_repo
-    from summarize.models import JobStatus, SummarizationType
+    from summarize.models import JobStatus
     from summarize.chunk_utils import (
         split_text_into_chunks,
-        estimate_chunk_summary_tokens,
         build_merge_messages
     )
     
