@@ -42,6 +42,9 @@ from summarize.job_utils import (
     ensure_directories,
     validate_file_extension,
     stage_uploaded_file,
+    read_result_file,
+    delete_job_files,
+    delete_all_job_files,
 )
 from summarize.db.connection import check_db_connection, close_db_connections
 from common.misc_utils import cleanup_staging_directory
@@ -976,6 +979,375 @@ async def create_summarization_job(
             500,
             "INTERNAL_SERVER_ERROR",
             f"Failed to create summarization job: {str(e)}"
+        )
+
+
+@app.get(
+    "/v1/summarize/jobs",
+    responses={
+        200: {"description": "Paginated job list"},
+        400: http_error_responses[400],
+        500: http_error_responses[500],
+    },
+    summary="List all summarization jobs",
+    description=(
+        "Retrieve all summarization jobs with optional filtering and pagination.\n\n"
+        "**Query parameters:**\n"
+        "- `latest` (bool): Return only the most recent job. Default: false\n"
+        "- `limit` (int): Records per page (1-100). Default: 20\n"
+        "- `offset` (int): Records to skip. Default: 0\n"
+        "- `status` (string): Filter by status: 'accepted', 'in_progress', 'completed', 'failed'\n"
+    ),
+    response_description="Paginated list of jobs with metadata",
+    tags=["jobs"],
+)
+async def list_jobs(
+    latest: Optional[bool] = None,
+    limit: int = 20,
+    offset: int = 0,
+    status: Optional[str] = None,
+):
+    """List all summarization jobs with pagination and filters."""
+    try:
+        # Validate limit parameter
+        if limit < 1 or limit > 100:
+            raise SummarizeException(
+                400,
+                "INVALID_PARAMETER",
+                "Limit must be between 1 and 100"
+            )
+        
+        # Validate offset parameter
+        if offset < 0:
+            raise SummarizeException(
+                400,
+                "INVALID_PARAMETER",
+                "Offset must be non-negative"
+            )
+        
+        # Validate and parse status parameter
+        status_filter = None
+        if status:
+            try:
+                from summarize.models import JobStatus
+                status_filter = JobStatus(status.lower())
+            except ValueError:
+                raise SummarizeException(
+                    400,
+                    "INVALID_PARAMETER",
+                    f"Invalid status value. Must be one of: accepted, in_progress, completed, failed"
+                )
+        
+        # Handle latest flag
+        if latest:
+            limit = 1
+            offset = 0
+        
+        # Get jobs from database
+        from summarize.db.manager import db_repo
+        jobs, total = db_repo.get_all_jobs(
+            status=status_filter,
+            limit=limit,
+            offset=offset
+        )
+        
+        # Format response
+        job_list = []
+        for job in jobs:
+            job_data = {
+                "job_id": job.job_id,
+                "job_name": job.job_name,
+                "status": job.status,
+                "submitted_at": job.submitted_at.isoformat() if job.submitted_at else None,
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            }
+            job_list.append(job_data)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "pagination": {
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset
+                },
+                "data": job_list
+            }
+        )
+        
+    except SummarizeException as se:
+        raise se
+    except Exception as e:
+        logger.error(f"Error listing jobs: {e}", exc_info=True)
+        raise SummarizeException(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "Failed to retrieve jobs"
+        )
+
+
+@app.get(
+    "/v1/summarize/jobs/{job_id}",
+    responses={
+        200: {"description": "Job details"},
+        404: http_error_responses[404],
+        500: http_error_responses[500],
+    },
+    summary="Get job details",
+    description="Retrieve detailed status and metadata of a specific summarization job.",
+    response_description="Full job details including document info and metadata",
+    tags=["jobs"],
+)
+async def get_job_details(job_id: str):
+    """Get detailed information about a specific job."""
+    try:
+        # Get job from database
+        from summarize.db.manager import db_repo
+        job = db_repo.get_job_by_id(job_id)
+        
+        if not job:
+            raise SummarizeException(
+                404,
+                "RESOURCE_NOT_FOUND",
+                f"Job {job_id} not found"
+            )
+        
+        # Format response
+        response_data = {
+            "job_id": job.job_id,
+            "job_name": job.job_name,
+            "status": job.status,
+            "submitted_at": job.submitted_at.isoformat() if job.submitted_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "document": {
+                "name": job.document_name,
+                "status": job.status
+            },
+            "error": job.error
+        }
+        
+        # Add metadata if present
+        if job.job_metadata:
+            response_data["metadata"] = job.job_metadata
+        
+        return JSONResponse(status_code=200, content=response_data)
+        
+    except SummarizeException as se:
+        raise se
+    except Exception as e:
+        logger.error(f"Error retrieving job {job_id}: {e}", exc_info=True)
+        raise SummarizeException(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            f"Failed to retrieve job details"
+        )
+
+
+@app.get(
+    "/v1/summarize/jobs/{job_id}/result",
+    responses={
+        200: {"description": "Summary result"},
+        202: {"description": "Job still in progress"},
+        404: http_error_responses[404],
+        500: http_error_responses[500],
+    },
+    summary="Get summarization result",
+    description=(
+        "Retrieve the completed summary and result metadata for a job.\n\n"
+        "Returns 202 Accepted if the job is still in progress.\n"
+        "Returns 404 if the job doesn't exist or result is not available."
+    ),
+    response_description="Summarization result with usage statistics",
+    tags=["jobs"],
+)
+async def get_job_result(job_id: str):
+    """Get the summarization result for a completed job."""
+    try:
+        # Get job from database
+        from summarize.db.manager import db_repo
+        job = db_repo.get_job_by_id(job_id)
+        
+        if not job:
+            raise SummarizeException(
+                404,
+                "RESOURCE_NOT_FOUND",
+                f"Job {job_id} not found"
+            )
+        
+        # Check job status
+        if job.status in ['accepted', 'in_progress']:
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "message": "Job is still in progress",
+                    "job_id": job_id,
+                    "status": job.status
+                }
+            )
+        
+        if job.status == 'failed':
+            raise SummarizeException(
+                404,
+                "RESOURCE_NOT_FOUND",
+                f"Job failed: {job.error or 'Unknown error'}"
+            )
+        
+        # Read result file
+        result_data = read_result_file(job_id)
+        
+        if not result_data:
+            logger.error(f"Result file missing for completed job {job_id}")
+            raise SummarizeException(
+                500,
+                "INTERNAL_SERVER_ERROR",
+                "Result file not found"
+            )
+        
+        return JSONResponse(status_code=200, content=result_data)
+        
+    except SummarizeException as se:
+        raise se
+    except Exception as e:
+        logger.error(f"Error retrieving result for job {job_id}: {e}", exc_info=True)
+        raise SummarizeException(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "Failed to retrieve job result"
+        )
+
+
+@app.delete(
+    "/v1/summarize/jobs/{job_id}",
+    status_code=204,
+    responses={
+        204: {"description": "Job and associated data deleted"},
+        404: http_error_responses[404],
+        409: {"description": "Job is still active (accepted or in_progress)"},
+        500: http_error_responses[500],
+    },
+    summary="Delete a job",
+    description=(
+        "Delete a specific job record and its associated result file.\n\n"
+        "Only completed or failed jobs can be deleted. "
+        "Attempting to delete an active job (accepted or in_progress) returns 409 Conflict."
+    ),
+    response_description="Job deleted successfully",
+    tags=["jobs"],
+)
+async def delete_job(job_id: str):
+    """Delete a specific job and its associated files."""
+    try:
+        # Get job from database
+        from summarize.db.manager import db_repo
+        job = db_repo.get_job_by_id(job_id)
+        
+        if not job:
+            raise SummarizeException(
+                404,
+                "RESOURCE_NOT_FOUND",
+                f"Job {job_id} not found"
+            )
+        
+        # Check if job is active
+        if job.status in ['accepted', 'in_progress']:
+            raise SummarizeException(
+                409,
+                "RESOURCE_LOCKED",
+                f"Cannot delete active job. Current status: {job.status}"
+            )
+        
+        # Delete files (result and staging)
+        delete_job_files(job_id)
+        
+        # Delete from database
+        success = db_repo.delete_job(job_id)
+        
+        if not success:
+            raise SummarizeException(
+                500,
+                "INTERNAL_SERVER_ERROR",
+                "Failed to delete job from database"
+            )
+        
+        logger.info(f"Deleted job {job_id}")
+        return JSONResponse(status_code=204, content=None)
+        
+    except SummarizeException as se:
+        raise se
+    except Exception as e:
+        logger.error(f"Error deleting job {job_id}: {e}", exc_info=True)
+        raise SummarizeException(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "Failed to delete job"
+        )
+
+
+@app.delete(
+    "/v1/summarize/jobs",
+    status_code=204,
+    responses={
+        204: {"description": "All jobs and data deleted"},
+        400: http_error_responses[400],
+        409: {"description": "Active jobs exist"},
+        500: http_error_responses[500],
+    },
+    summary="Bulk delete all jobs",
+    description=(
+        "Delete all job records, result files, and staging data.\n\n"
+        "**Query parameters:**\n"
+        "- `confirm` (bool, required): Must be 'true' to proceed with bulk deletion\n\n"
+        "Returns 409 Conflict if any active jobs (accepted or in_progress) exist."
+    ),
+    response_description="All jobs deleted successfully",
+    tags=["jobs"],
+)
+async def bulk_delete_jobs(confirm: Optional[bool] = None):
+    """Delete all jobs and associated files."""
+    try:
+        # Validate confirm parameter
+        if confirm is not True:
+            raise SummarizeException(
+                400,
+                "INVALID_REQUEST",
+                "Bulk delete requires confirm=true query parameter"
+            )
+        
+        # Check for active jobs
+        from summarize.db.manager import db_repo
+        active_jobs = db_repo.get_active_jobs()
+        
+        if active_jobs:
+            raise SummarizeException(
+                409,
+                "RESOURCE_LOCKED",
+                f"Cannot delete: {len(active_jobs)} active job(s) exist"
+            )
+        
+        # Delete all files
+        delete_all_job_files()
+        
+        # Delete all jobs from database
+        success = db_repo.delete_all_jobs()
+        
+        if not success:
+            raise SummarizeException(
+                500,
+                "INTERNAL_SERVER_ERROR",
+                "Failed to delete jobs from database"
+            )
+        
+        logger.info("Bulk deleted all jobs")
+        return JSONResponse(status_code=204, content=None)
+        
+    except SummarizeException as se:
+        raise se
+    except Exception as e:
+        logger.error(f"Error in bulk delete: {e}", exc_info=True)
+        raise SummarizeException(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "Failed to delete all jobs"
         )
 
 
