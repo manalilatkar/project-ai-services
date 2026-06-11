@@ -14,7 +14,17 @@ from starlette.concurrency import iterate_in_threadpool
 from common.misc_utils import set_log_level, get_logger
 from summarize.db_operations import create_job_with_db
 from summarize.settings import settings
-from summarize.models import SummarizationType
+from summarize.models import (
+    SummarizationType,
+    JobsListResponse,
+    JobCreatedResponse,
+    JobDetailResponse,
+    JobResultResponse,
+    PaginationInfo,
+    DocumentInfo,
+    JobState,
+    JobStatus
+)
 
 set_log_level(settings.common.app.log_level)
 
@@ -868,6 +878,7 @@ async def process_summarization_job(job_id: str, level):
 @app.post(
     "/v1/summarize/jobs",
     status_code=202,
+    response_model=JobCreatedResponse,
     responses={
         202: {"description": "Job created successfully"},
         400: http_error_responses[400],
@@ -965,11 +976,8 @@ async def create_summarization_job(
         # Launch background processing (stub for now)
         background_tasks.add_task(process_summarization_job, job_id, level)
         
-        # Return 202 Accepted with job_id
-        return JSONResponse(
-            status_code=202,
-            content={"job_id": job_id}
-        )
+        # Return 202 Accepted with job_id using JobCreatedResponse
+        return JobCreatedResponse(job_id=job_id)
         
     except SummarizeException as se:
         raise se
@@ -984,6 +992,7 @@ async def create_summarization_job(
 
 @app.get(
     "/v1/summarize/jobs",
+    response_model=JobsListResponse,
     responses={
         200: {"description": "Paginated job list"},
         400: http_error_responses[400],
@@ -1029,7 +1038,6 @@ async def list_jobs(
         status_filter = None
         if status:
             try:
-                from summarize.models import JobStatus
                 status_filter = JobStatus(status.lower())
             except ValueError:
                 raise SummarizeException(
@@ -1051,28 +1059,31 @@ async def list_jobs(
             offset=offset
         )
         
-        # Format response
+        # Format response using JobsListResponse with JobState objects
         job_list = []
         for job in jobs:
-            job_data = {
-                "job_id": job.job_id,
-                "job_name": job.job_name,
-                "status": job.status,
-                "submitted_at": job.submitted_at.isoformat() if job.submitted_at else None,
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-            }
-            job_list.append(job_data)
+            # Convert status string to JobStatus enum if needed
+            job_status = job.status if isinstance(job.status, JobStatus) else JobStatus(job.status)
+            
+            # Create JobState object
+            job_state = JobState(
+                job_id=job.job_id,
+                job_name=job.job_name,
+                status=job_status,
+                submitted_at=job.submitted_at.isoformat() if job.submitted_at else "",
+                completed_at=job.completed_at.isoformat() if job.completed_at else None,
+                updated_at=job.updated_at.isoformat() if hasattr(job, 'updated_at') and job.updated_at else None,
+                document_name=job.document_name if hasattr(job, 'document_name') else None,
+                document_word_count=job.document_word_count if hasattr(job, 'document_word_count') else 0,
+                level=job.level if hasattr(job, 'level') else None,
+                job_type=job.job_type if hasattr(job, 'job_type') else None,
+                error=job.error if hasattr(job, 'error') else None
+            )
+            job_list.append(job_state)
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "pagination": {
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset
-                },
-                "data": job_list
-            }
+        return JobsListResponse(
+            pagination=PaginationInfo(total=total, limit=limit, offset=offset),
+            data=job_list
         )
         
     except SummarizeException as se:
@@ -1088,6 +1099,7 @@ async def list_jobs(
 
 @app.get(
     "/v1/summarize/jobs/{job_id}",
+    response_model=JobDetailResponse,
     responses={
         200: {"description": "Job details"},
         404: http_error_responses[404],
@@ -1112,25 +1124,25 @@ async def get_job_details(job_id: str):
                 f"Job {job_id} not found"
             )
         
-        # Format response
-        response_data = {
-            "job_id": job.job_id,
-            "job_name": job.job_name,
-            "status": job.status,
-            "submitted_at": job.submitted_at.isoformat() if job.submitted_at else None,
-            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-            "document": {
-                "name": job.document_name,
-                "status": job.status
-            },
-            "error": job.error
-        }
+        # Format response using JobDetailResponse
+        document = DocumentInfo(
+            name=job.document_name or "",
+            status=job.status
+        )
         
-        # Add metadata if present
-        if job.job_metadata:
-            response_data["metadata"] = job.job_metadata
+        # Convert status string to JobStatus enum if needed
+        job_status = job.status if isinstance(job.status, JobStatus) else JobStatus(job.status)
         
-        return JSONResponse(status_code=200, content=response_data)
+        return JobDetailResponse(
+            job_id=job.job_id,
+            job_name=job.job_name,
+            status=job_status,
+            submitted_at=job.submitted_at.isoformat() if job.submitted_at else "",
+            completed_at=job.completed_at.isoformat() if job.completed_at else None,
+            document=document,
+            error=job.error,
+            metadata=job.job_metadata if job.job_metadata else None
+        )
         
     except SummarizeException as se:
         raise se
@@ -1145,6 +1157,7 @@ async def get_job_details(job_id: str):
 
 @app.get(
     "/v1/summarize/jobs/{job_id}/result",
+    response_model=JobResultResponse,
     responses={
         200: {"description": "Summary result"},
         202: {"description": "Job still in progress"},
@@ -1203,7 +1216,12 @@ async def get_job_result(job_id: str):
                 "Result file not found"
             )
         
-        return JSONResponse(status_code=200, content=result_data)
+        # Use JobResultResponse to structure the response
+        return JobResultResponse(
+            data=result_data.get("data", {}),
+            meta=result_data.get("meta", {}),
+            usage=result_data.get("usage", {})
+        )
         
     except SummarizeException as se:
         raise se
