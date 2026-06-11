@@ -66,10 +66,6 @@ class JobMetadata(BaseModel):
     failed_chunks: int = Field(default=0, ge=0, description="Number of failed summarized chunks")
     phase: str = Field(default="", description="Phase: summarizing or merging")
 
-    class Config:
-        """Pydantic configuration."""
-        use_enum_values = True
-
 
 class JobState(BaseModel):
     """
