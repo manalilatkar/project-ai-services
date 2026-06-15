@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/project-ai-services/ai-services/internal/pkg/catalog/cli/configure"
+	catalogPodman "github.com/project-ai-services/ai-services/internal/pkg/catalog/cli/configure/podman"
 	"github.com/project-ai-services/ai-services/internal/pkg/constants"
 	"github.com/project-ai-services/ai-services/internal/pkg/logger"
 	"github.com/project-ai-services/ai-services/internal/pkg/runtime"
@@ -27,6 +28,8 @@ var (
 	sslKeyPath  string
 	// HTTPS port flag for catalog configure command.
 	httpsPort int
+	// Reset password flag for catalog configure command.
+	resetPasswordFlag bool
 )
 
 const (
@@ -49,9 +52,17 @@ Examples:
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 
+			if resetPasswordFlag {
+				return validateResetFlags(cmd)
+			}
+
 			return validateConfigureFlags()
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if resetPasswordFlag {
+				return runResetPassword()
+			}
+
 			return runConfigure()
 		},
 	}
@@ -99,8 +110,54 @@ func runConfigure() error {
 	return configure.Run(vars.RuntimeFactory.GetRuntimeType(), aiServicesDir, domainName, cleanCertPath, cleanKeyPath, httpsPort)
 }
 
+func validateResetFlags(cmd *cobra.Command) error {
+	if err := validateRuntimeFlag(); err != nil {
+		return err
+	}
+
+	// Check if basedir was explicitly setn
+	if baseDir != "" {
+		return fmt.Errorf("--base-dir cannot be used with --reset-password")
+	}
+
+	// Check if domain-name was explicitly set
+	if domainName != "" {
+		return fmt.Errorf("--domain-name cannot be used with --reset-password")
+	}
+
+	// Check if https-port was explicitly set by the user
+	if cmd.Flags().Changed("https-port") {
+		return fmt.Errorf("--https-port cannot be used with --reset-password")
+	}
+
+	// Check if SSL certificate flags were set
+	if sslCertPath != "" || sslKeyPath != "" {
+		return fmt.Errorf("--ssl-cert and --ssl-key cannot be used with --reset-password")
+	}
+
+	return nil
+}
+
 // validateConfigureFlags validates the configure command flags and initializes runtime.
 func validateConfigureFlags() error {
+	if err := validateRuntimeFlag(); err != nil {
+		return err
+	}
+
+	// Validate SSL flags
+	if err := validateSSLFlags(); err != nil {
+		return err
+	}
+
+	// Validate HTTPS port range
+	if httpsPort < 1 || httpsPort > 65535 {
+		return fmt.Errorf("invalid HTTPS port %d: must be between 1 and 65535", httpsPort)
+	}
+
+	return nil
+}
+
+func validateRuntimeFlag() error {
 	// Initialize runtime factory based on flag
 	rt := types.RuntimeType(runtimeType)
 	if !rt.Valid() {
@@ -113,16 +170,6 @@ func validateConfigureFlags() error {
 	// Check if podman runtime is being used on unsupported platform
 	if err := utils.CheckPodmanPlatformSupport(vars.RuntimeFactory.GetRuntimeType()); err != nil {
 		return err
-	}
-
-	// Validate SSL flags
-	if err := validateSSLFlags(); err != nil {
-		return err
-	}
-
-	// Validate HTTPS port range
-	if httpsPort < 1 || httpsPort > 65535 {
-		return fmt.Errorf("invalid HTTPS port %d: must be between 1 and 65535", httpsPort)
 	}
 
 	return nil
@@ -234,6 +281,30 @@ func configureConfigureFlags(cmd *cobra.Command) {
 			"Must be used together with --ssl-cert.\n"+
 			"Example: --ssl-key /path/to/key.pem\n",
 	)
+
+	cmd.Flags().BoolVar(
+		&resetPasswordFlag,
+		"reset-password",
+		false,
+		"Reset the password for the admin user",
+	)
+}
+
+func runResetPassword() error {
+	logger.Warningf("Resetting password will reload catalog pod!")
+	// Confirm deletion
+	confirmed, err := utils.ConfirmAction("\nDo you want to continue, with password reset?")
+	if err != nil {
+		return fmt.Errorf("failed to get confirmation: %w", err)
+	}
+
+	if !confirmed {
+		logger.Infoln("Catalog password reset cancelled")
+
+		return nil
+	}
+
+	return catalogPodman.ResetCatalogPassword()
 }
 
 // Made with Bob

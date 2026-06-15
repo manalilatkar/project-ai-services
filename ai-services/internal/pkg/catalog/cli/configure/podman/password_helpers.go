@@ -22,6 +22,10 @@ func collectAndHashPassword(rt runtime.Runtime) (string, error) {
 		return "", nil
 	}
 
+	return promptAndHashPassword()
+}
+
+func promptAndHashPassword() (string, error) {
 	// Prompt for admin password if secret doesn't exist
 	adminPassword, err := promptForPassword()
 	if err != nil {
