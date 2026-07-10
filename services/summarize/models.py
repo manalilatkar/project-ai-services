@@ -37,6 +37,14 @@ class DocumentInfo(BaseModel):
     name: str
     status: str
 
+class JobMetadata(BaseModel):
+    """Metadata for chunked summarization in a job."""
+    model_config = ConfigDict(use_enum_values=True)
+
+    total_chunks: int = Field(default=0, ge=0, description="Total number of chunks")
+    completed_chunks: int = Field(default=0, ge=0, description="Number of completed summarized chunks")
+    phase: str = Field(default="", description="Phase: summarizing or merging")
+
 
 class JobDetailResponse(BaseModel):
     """Response model for single job detail."""
@@ -68,15 +76,6 @@ class JobResultResponse(BaseModel):
     data: dict  # {"summary": str, "original_length": int, "summary_length": int}
     meta: dict  # {"model": str, "processing_time_ms": int, "input_type": str, "strategy": str}
     usage: dict  # {"input_tokens": int, "output_tokens": int, "total_tokens": int}
-
-
-class JobMetadata(BaseModel):
-    """Metadata for chunked summarization in a job."""
-    model_config = ConfigDict(use_enum_values=True)
-
-    total_chunks: int = Field(default=0, ge=0, description="Total number of chunks")
-    completed_chunks: int = Field(default=0, ge=0, description="Number of completed summarized chunks")
-    phase: str = Field(default="", description="Phase: summarizing or merging")
 
 
 class JobState(BaseModel):
