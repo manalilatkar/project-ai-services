@@ -47,7 +47,20 @@ class JobDetailResponse(BaseModel):
     completed_at: Optional[str] = None
     document: DocumentInfo
     error: Optional[str] = None
-    metadata: Optional[dict] = None
+    metadata: JobMetadata = Field(default_factory=JobMetadata)
+
+    @field_validator('metadata', mode='before')
+    @classmethod
+    def validate_stats(cls, v):
+        """Ensure stats is valid, return default if not."""
+        if isinstance(v, JobMetadata):
+            return v
+        if isinstance(v, dict):
+            try:
+                return JobMetadata(**v)
+            except Exception:
+                return JobMetadata()
+        return JobMetadata()
 
 
 class JobResultResponse(BaseModel):
@@ -63,7 +76,6 @@ class JobMetadata(BaseModel):
 
     total_chunks: int = Field(default=0, ge=0, description="Total number of chunks")
     completed_chunks: int = Field(default=0, ge=0, description="Number of completed summarized chunks")
-    failed_chunks: int = Field(default=0, ge=0, description="Number of failed summarized chunks")
     phase: str = Field(default="", description="Phase: summarizing or merging")
 
 
