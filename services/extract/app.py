@@ -19,7 +19,7 @@ from common.error_utils import http_error_responses
 
 from extract.db.connection import check_db_connection, close_db_connections
 
-from extract.utils.schema import SchemaValidationError
+from extract.utils.schema import ExtractException, SchemaValidationError
 from extract.settings import settings
 
 set_log_level(settings.common.app.log_level)
@@ -157,6 +157,14 @@ def health():
 
 @app.exception_handler(SchemaValidationError)
 async def schema_validation_error_handler(request: Request, exc: SchemaValidationError):
+    body: dict = {"error": {"code": exc.code, "message": exc.message, "status": exc.status}}
+    if exc.details:
+        body["error"]["details"] = exc.details
+    return JSONResponse(status_code=exc.status, content=body)
+
+
+@app.exception_handler(ExtractException)
+async def extract_exception_handler(request: Request, exc: ExtractException):
     body: dict = {"error": {"code": exc.code, "message": exc.message, "status": exc.status}}
     if exc.details:
         body["error"]["details"] = exc.details

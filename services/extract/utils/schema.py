@@ -69,6 +69,30 @@ class SchemaValidationError(Exception):
         super().__init__(message)
 
 
+class ExtractException(Exception):
+    """
+    General-purpose exception for extraction-path errors (sync endpoint and
+    future async worker).  Carries an HTTP status code, a machine-readable
+    error code string, a human-readable message, and an optional details dict.
+
+    Signature mirrors SchemaValidationError so the two are interchangeable
+    at raise sites; a dedicated handler in app.py serialises it to JSON.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status: int = 400,
+        details: Optional[dict] = None,
+    ):
+        self.code = code
+        self.message = message
+        self.status = status
+        self.details = details or {}
+        super().__init__(message)
+
+
 
 
 
