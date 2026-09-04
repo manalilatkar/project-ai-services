@@ -50,10 +50,12 @@ from extract.utils.job import (
     validate_file_extension,
 )
 from extract.utils.schema import (
+    SchemaValidationError,
     _tokenize,
     check_extraction_budget,
     compute_reserved_output,
     fmt_dt,
+    resolve_schema_input,
 )
 
 router = APIRouter()
@@ -99,7 +101,22 @@ async def extract_sync(request: Request, body: ExtractionRequest) -> JSONRespons
     # ------------------------------------------------------------------
     if not body.text.strip():
         raise ExtractException(400, "INVALID_REQUEST", "text field is empty")
-    schema_row = _resolve_schema(body.schema_id)
+
+    llm_model_dict = get_llm_endpoint()
+    llm_endpoint: str = llm_model_dict.get("llm_endpoint", "")
+    llm_model: str = llm_model_dict.get("llm_model", "")
+    max_model_len: int = llm_model_dict.get('max_model_len', "")
+
+    try:
+        schema_row = resolve_schema_input(
+            schema_id=body.schema_id,
+            schema_name=body.schema_name,
+            json_schema=body.json_schema,
+            json_example=body.json_example,
+            llm_endpoint=llm_endpoint,
+        )
+    except SchemaValidationError as exc:
+        raise ExtractException(exc.status, exc.code, exc.message, details=exc.details)
 
     # ------------------------------------------------------------------
     # 2. Semaphore check (non-blocking — reject immediately if saturated)
@@ -109,11 +126,6 @@ async def extract_sync(request: Request, body: ExtractionRequest) -> JSONRespons
             429, "RATE_LIMIT_EXCEEDED",
             "Server is at maximum vLLM concurrency. Please retry later.",
         )
-
-    llm_model_dict = get_llm_endpoint()
-    llm_endpoint: str = llm_model_dict.get("llm_endpoint", "")
-    llm_model: str = llm_model_dict.get("llm_model", "")
-    max_model_len: int = llm_model_dict.get('max_model_len', "")
 
     # ------------------------------------------------------------------
     # 3–8. Core extraction
@@ -232,7 +244,7 @@ async def extract_sync(request: Request, body: ExtractionRequest) -> JSONRespons
         content={
             "data": {
                 "extraction": parsed_output,
-                "schema_id": body.schema_id,
+                "schema_id": schema_row.schema_id,
                 "source": {
                     "input_type": "text",
                     "input_tokens": input_tokens,
@@ -286,18 +298,6 @@ def _validate_and_resolve_file(file: UploadFile) -> tuple[str, str]:
     return filename, (ext or "").lstrip(".")
 
 
-def _resolve_schema(schema_id: str):
-    """Return the schema row for *schema_id*.
-
-    Raises:
-        ExtractException(404) if the schema does not exist.
-    """
-    row = db_repo.get_schema_by_id(schema_id)
-    if row is None:
-        raise ExtractException(
-            404,"SCHEMA_NOT_FOUND",
-              f"No schema with id {schema_id!r}.")
-    return row
 
 
 def _stage_and_persist(
@@ -427,7 +427,10 @@ async def create_extract_job(
     _check_job_admission()
     filename, source_type = _validate_and_resolve_file(file)
     await _validate_file_content(file)
-    _resolve_schema(schema_id)
+    if db_repo.get_schema_by_id(schema_id) is None:
+        raise ExtractException(
+            404, "SCHEMA_NOT_FOUND", f"No schema with id {schema_id!r}."
+        )
 
     job_id = str(uuid.uuid4())
     _stage_and_persist(job_id, file, schema_id, filename, source_type, job_name)
@@ -482,7 +485,12 @@ async def _process_extract_job(job_id: str) -> None:
             # 1. Resolve schema
             # --------------------------------------------------------------
             try:
-                schema_row = _resolve_schema(job_row.schema_id)
+                schema_row = db_repo.get_schema_by_id(job_row.schema_id)
+                if schema_row is None:
+                    raise ExtractException(
+                        404, "SCHEMA_NOT_FOUND",
+                        f"No schema with id {job_row.schema_id!r}.",
+                    )
             except ExtractException as exc:
                 db_repo.update_job(
                     job_id=job_id,

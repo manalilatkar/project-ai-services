@@ -91,6 +91,26 @@ class DatabaseManager:
             return None
 
     @staticmethod
+    def get_schema_by_name(name: str) -> Optional[ExtractionSchema]:
+        """Return a schema row by its unique name, or None if not found."""
+        try:
+            with get_db_session() as session:
+                row = session.scalar(
+                    select(ExtractionSchema).where(ExtractionSchema.name == name)
+                )
+                if row:
+                    _ = (
+                        row.schema_id, row.name, row.description, row.json_schema,
+                        row.examples, row.custom_prompt, row.schema_tokens,
+                        row.examples_tokens, row.custom_prompt_tokens, row.created_at,
+                    )
+                    session.expunge(row)
+                return row
+        except SQLAlchemyError as exc:
+            logger.error(f"DB error retrieving schema by name {name!r}: {exc}", exc_info=True)
+            return None
+
+    @staticmethod
     def schema_name_exists(name: str) -> bool:
         """Return True when a schema with *name* already exists."""
         try:

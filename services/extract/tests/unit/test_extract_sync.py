@@ -298,9 +298,23 @@ class TestExtractionRequestModel:
         with pytest.raises(Exception):
             ExtractionRequest(schema_id="abc")
 
-    def test_missing_schema_id_rejected(self):
+    def test_no_schema_source_rejected(self):
         with pytest.raises(Exception):
             ExtractionRequest(text="hello")
+
+    def test_schema_name_accepted(self):
+        req = ExtractionRequest(text="hello", schema_name="my-schema")
+        assert req.schema_name == "my-schema"
+        assert req.schema_id is None
+
+    def test_json_schema_accepted(self):
+        schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+        req = ExtractionRequest(text="hello", json_schema=schema)
+        assert req.json_schema == schema
+
+    def test_json_example_accepted(self):
+        req = ExtractionRequest(text="hello", json_example={"name": "Alice"})
+        assert req.json_example == {"name": "Alice"}
 
 
 # ---------------------------------------------------------------------------
@@ -378,10 +392,10 @@ class TestExtractSyncEndpoint:
         )
         assert resp.status_code == 422
 
-    def test_400_missing_schema_id(self, extract_test_client):
+    def test_422_no_schema_source(self, extract_test_client):
         resp = extract_test_client.post("/v1/extract", json={"text": "hello"})
         assert resp.status_code == 422
-        assert resp.json()["detail"][0]["type"] == "missing"
+        assert resp.json()["detail"][0]["type"] == "value_error"
 
     def test_400_missing_text(self, extract_test_client):
         resp = extract_test_client.post("/v1/extract", json={"schema_id": "abc"})
