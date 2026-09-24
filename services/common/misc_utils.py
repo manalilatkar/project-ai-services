@@ -208,6 +208,7 @@ def resolve_model_max_len(endpoint: str, model_name: str, fallback_max_model_len
     calls within the same process incur no network round-trips.
     """
     from common.llm_utils import query_litellm_model_info, query_vllm_models
+    _rml_logger = get_logger("resolve_model_max_len")
 
     cache_key = (endpoint, model_name)
     if cache_key in _model_max_len_cache:
@@ -221,6 +222,10 @@ def resolve_model_max_len(endpoint: str, model_name: str, fallback_max_model_len
                 max_tokens = entry.get("model_info", {}).get("max_tokens")
                 if isinstance(max_tokens, int) and max_tokens > 0:
                     _model_max_len_cache[cache_key] = max_tokens
+                    _rml_logger.info(
+                        f"max_model_len={max_tokens} for model '{model_name}' "
+                        f"resolved from LiteLLM /model/info at {endpoint}"
+                    )
                     return max_tokens
                 break
     except Exception:
@@ -234,6 +239,10 @@ def resolve_model_max_len(endpoint: str, model_name: str, fallback_max_model_len
                 max_model_len = model_info.get("max_model_len")
                 if isinstance(max_model_len, int) and max_model_len > 0:
                     _model_max_len_cache[cache_key] = max_model_len
+                    _rml_logger.info(
+                        f"max_model_len={max_model_len} for model '{model_name}' "
+                        f"resolved from vLLM /v1/models at {endpoint}"
+                    )
                     return max_model_len
                 break
     except Exception:
@@ -241,6 +250,11 @@ def resolve_model_max_len(endpoint: str, model_name: str, fallback_max_model_len
 
     # --- 3. Fallback ---
     _model_max_len_cache[cache_key] = fallback_max_model_len
+    _rml_logger.warning(
+        f"max_model_len={fallback_max_model_len} for model '{model_name}' "
+        f"at {endpoint}: both /model/info and /v1/models were unreachable "
+        f"or returned no usable value — using configured fallback"
+    )
     return fallback_max_model_len
 
 

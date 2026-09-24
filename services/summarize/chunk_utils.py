@@ -11,7 +11,7 @@ from sentence_splitter import SentenceSplitter
 
 from common.misc_utils import get_logger
 from summarize.settings import settings
-from summarize.summ_utils import word_count, MAX_INPUT_WORDS
+from summarize.summ_utils import word_count, get_max_input_words
 
 logger = get_logger("chunk_utils")
 
@@ -42,7 +42,7 @@ def split_text_into_chunks(
         List of text chunks
     """
     if max_words is None:
-        max_words = MAX_INPUT_WORDS
+        max_words = get_max_input_words()
     
     if overlap_sentences is None:
         overlap_sentences = settings.summarize.chunk_overlap_sentences
@@ -97,21 +97,37 @@ def split_text_into_chunks(
             # Extract last N sentences for overlap
             previous_sentences = _extract_last_sentences(chunk_text, overlap_sentences)
             
-            # Start new chunk with overlap
+            # Start new chunk with overlap, but only if the overlap itself
+            # doesn't push this new chunk over max_words before any further
+            # content is added.
             if previous_sentences:
                 overlap_text = ' '.join(previous_sentences)
-                current_chunk = [overlap_text, paragraph]
-                current_word_count = word_count(overlap_text) + para_word_count
+                overlap_word_count = word_count(overlap_text)
+                if overlap_word_count + para_word_count > max_words:
+                    # Overlap alone would overflow; start the chunk without it
+                    current_chunk = [paragraph]
+                    current_word_count = para_word_count
+                else:
+                    current_chunk = [overlap_text, paragraph]
+                    current_word_count = overlap_word_count + para_word_count
             else:
                 current_chunk = [paragraph]
                 current_word_count = para_word_count
         else:
             # Add paragraph to current chunk
             if not current_chunk and previous_sentences:
-                # First paragraph of new chunk - add overlap
+                # First paragraph of new chunk - add overlap, but only if the
+                # overlap itself doesn't push this chunk over max_words before
+                # any content is even added.
                 overlap_text = ' '.join(previous_sentences)
-                current_chunk = [overlap_text, paragraph]
-                current_word_count = word_count(overlap_text) + para_word_count
+                overlap_word_count = word_count(overlap_text)
+                if overlap_word_count + para_word_count > max_words:
+                    # Overlap alone would overflow; start the chunk without it
+                    current_chunk = [paragraph]
+                    current_word_count = para_word_count
+                else:
+                    current_chunk = [overlap_text, paragraph]
+                    current_word_count = overlap_word_count + para_word_count
             else:
                 current_chunk.append(paragraph)
                 current_word_count += para_word_count

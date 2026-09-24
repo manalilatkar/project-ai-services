@@ -381,7 +381,7 @@ def validate_summary_length(summary_length) -> Optional[int]:
         except (TypeError, ValueError):
             raise SummarizeException(400, "INVALID_PARAMETER",
                                      "Length must be an integer")
-        if summary_length <=0 or summary_length > MAX_INPUT_WORDS:
+        if summary_length <= 0 or summary_length > get_max_input_words():
             raise SummarizeException(400, "INVALID_PARAMETER",
                                      "Length is out of bounds")
         return summary_length

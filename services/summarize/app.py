@@ -47,7 +47,7 @@ from summarize.summ_utils import (
     validate_input_and_get_available_tokens,
     extract_text_from_pdf,
     get_llm_max_model_len,
-    MAX_INPUT_WORDS
+    get_max_input_words,
 )
 from summarize.job_utils import (
     ensure_directories,
@@ -621,10 +621,14 @@ async def process_summarization_job(job_id: str, level):
             logger.info(f"Updated job {job_id} type to CHUNKED in database")
             
             # Split into chunks
+            # Call get_max_input_words() at request time so it uses the real
+            # max_model_len resolved after the HTTP session was initialised,
+            # rather than the stale module-level constant that was frozen before
+            # SESSION existed and may have been computed from the fallback value.
             chunks = await asyncio.to_thread(
                 split_text_into_chunks,
                 content_text,
-                MAX_INPUT_WORDS,
+                get_max_input_words(),
                 settings.summarize.chunk_overlap_sentences
             )
             
