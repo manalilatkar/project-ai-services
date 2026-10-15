@@ -1,4 +1,4 @@
-image: registry.redhat.io/rhaii/vllm-spyre-rhel9:3.5.0
+image: icr.io/ai_sw_accel/2.0/next/spyre-inference:ppc64le-dev
 model: ""
 apiKey: ""
 maxModelLen: 32768
